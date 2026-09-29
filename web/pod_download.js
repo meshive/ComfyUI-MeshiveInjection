@@ -1,5 +1,10 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
+import {
+    T, EVT, SETTING, keyOf, isActive, isRunning, isDone, current, latestFor, upsert, startDownload,
+    control, refreshAll, refreshModels, checkVersion, toast, fmtBytes, debugLog, onChange, onReset, seqMark,
+} from "./meshive_core.js";
+import { HUB_BUTTON_CLASS, toggleHub, rememberRequest, setInstaller } from "./meshive_hub.js";
 
 // ComfyUI's "Download" button in the Missing Models panel is a browser download, so the model
 // lands on the user's computer. Next to it we add "Install in Meshive Pod", which asks the
@@ -12,29 +17,9 @@ import { api } from "../../scripts/api.js";
 //   * position: the `data-testid="missing-model-download"` / `"missing-model-download-all"` buttons
 // Re-check both whenever the frontend is upgraded. If they are gone, the extension adds nothing.
 
-const EVT_PROGRESS = "meshive_download_progress";
-const EVT_PAUSED = "meshive_download_paused";
-const EVT_RESUMED = "meshive_download_resumed";
-const EVT_COMPLETE = "meshive_download_complete";
-const EVT_ERROR = "meshive_download_error";
 const ROW_TESTID = "missing-model-download";
 const ALL_TESTID = "missing-model-download-all";
 const MARK = "data-meshive-pod";
-
-const ko = (() => {
-    try {
-        const loc = app.extensionManager?.setting?.get?.("Comfy.Locale") || document.documentElement.lang || navigator.language;
-        return String(loc).toLowerCase().startsWith("ko");
-    } catch { return false; }
-})();
-// The button text is the same in every locale; the status text follows the locale.
-const T = ko
-    ? { pod: "Install in Meshive Pod", podAll: "Install all in Meshive Pod", cancel: "취소", resume: "이어받기", done: "Pod에 저장됨", doneTemp: "Pod에 저장됨(임시)", tempNote: "이 모델 폴더는 Pod 스토리지에 없어 시스템 디스크에 저장했습니다. 지금 바로 쓸 수 있지만 Pod 가 재시작되면 사라집니다. 유지하려면 이 폴더를 덮는 볼륨을 연결하세요.", queued: "대기 중", paused: "일시정지", verifying: "검증 중", waiting: "스토리지 확장 대기", failed: "실패 — 다시 시도", exists: "이미 있음" }
-    : { pod: "Install in Meshive Pod", podAll: "Install all in Meshive Pod", cancel: "Cancel", resume: "Resume", done: "Saved in Pod", doneTemp: "Saved in Pod (temporary)", tempNote: "This model folder is not on pod storage, so the file was saved to the system disk. It works now but is lost when the pod restarts. Attach a volume that covers this folder to keep it.", queued: "Queued", paused: "Paused", verifying: "Verifying", waiting: "Waiting for storage", failed: "Failed — retry", exists: "Already there" };
-
-// key (`directory/name`) -> server state (plus a client-side error message)
-const states = new Map();
-const keyOf = (directory, name) => `${directory}/${name}`;
 
 function getMissingStore() {
     try {
@@ -64,18 +49,6 @@ function candidates() {
     return out;
 }
 
-function toast(severity, summary, detail) {
-    try { app.extensionManager.toast.add({ severity, summary, detail, life: 8000 }); }
-    catch { console[severity === "error" ? "error" : "log"](`[meshive] ${summary}: ${detail ?? ""}`); }
-}
-
-function fmtBytes(n) {
-    if (!n) return "0 B";
-    const u = ["B", "KB", "MB", "GB", "TB"];
-    const i = Math.min(u.length - 1, Math.floor(Math.log(n) / Math.log(1024)));
-    return `${(n / 1024 ** i).toFixed(i ? 1 : 0)} ${u[i]}`;
-}
-
 function labelFor(st) {
     if (!st) return null;
     switch (st.status) {
@@ -94,84 +67,154 @@ function labelFor(st) {
     }
 }
 
-// Paused counts as active: the server keeps it (and its partial file) until it is resumed or cancelled.
-const isActive = (st) => st && ["queued", "downloading", "waiting_storage", "verifying", "paused"].includes(st.status);
-const isDone = (st) => st && ["complete", "exists"].includes(st.status);
-// "Saved" only matters until the Missing list refreshes. If the same model is still missing after
-// that, the file is gone (deleted, or the pod moved to fresh storage) — forget it so it can be
-// installed again.
-const DONE_TTL_MS = 10000;
-function freshState(key) {
-    const st = states.get(key);
-    if (isDone(st) && Date.now() - (st.doneAt ?? 0) > DONE_TTL_MS) { states.delete(key); return undefined; }
+async function install(c) {
+    rememberRequest(c);
+    const st = await startDownload(c);
+    if (st?.status === "exists") await refreshModels(getMissingStore);
     return st;
 }
 
-async function startOne(c) {
-    const key = keyOf(c.directory, c.name);
-    let res;
-    try {
-        res = await api.fetchApi("/meshive/download/start", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ url: c.url, directory: c.directory, filename: c.name, hash: c.hash, hash_type: c.hash_type }),
-        });
-    } catch (e) {
-        states.set(key, { status: "error", error: String(e), filename: c.name, directory: c.directory });
-        return render();
-    }
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok) {
-        states.set(key, { status: "error", error: body.error || `HTTP ${res.status}`, filename: c.name, directory: c.directory });
-        toast("error", c.name, body.error || `HTTP ${res.status}`);
-    } else {
-        states.set(key, { ...body, directory: c.directory, filename: c.name, doneAt: Date.now() });
-        if (body.status === "exists") await refreshModels();
-    }
+// ── "Install all" batch and its progress area ───────────────────────────────
+// The batch follows the latest attempt for each file made since it started — so a retry from the
+// file's own button or the downloads panel counts too — and remembers the last state it saw, so a
+// "Clear finished" does not turn a finished file back into a pending one.
+let batch = null; // {since, entries: Map key -> {request, floor, last}}
+
+async function startBatch(list) {
+    if (!list.length) return;
+    const since = seqMark();
+    batch = { since, entries: new Map(list.map((c) => [keyOf(c.directory, c.name), { request: c, floor: since, last: null }])) };
+    const mine = batch;
+    render();
+    await Promise.all(list.map(async (c) => {
+        const st = await install(c);
+        // The server may hand back a download that was already running (started elsewhere).
+        const entry = mine.entries.get(keyOf(c.directory, c.name));
+        if (st && typeof st.seq === "number" && st.seq <= entry.floor) entry.floor = st.seq - 0.25;
+    }));
+    settleBatch(); // everything may have been there already: no download, so no event to settle it
     render();
 }
 
-async function control(action, st) {
-    if (!st?.id) return;
-    try {
-        const res = await api.fetchApi(`/meshive/download/${action}`, {
-            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: st.id }),
-        });
-        if (!res.ok) toast("warn", st.filename ?? "", (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`);
-    } catch (e) { toast("error", st.filename ?? "", String(e)); }
+function stateOf(entry) {
+    const latest = latestFor(entry.request.directory, entry.request.name);
+    if (latest && latest.seq > entry.floor) entry.last = latest;
+    return entry.last;
 }
 
-// Make the new file show up in model dropdowns and drop out of the Missing list right away.
-async function refreshModels() {
-    try { await app.refreshComboInNodes?.(); } catch (e) { console.warn("[meshive] refreshComboInNodes failed", e); }
-    try { await getMissingStore()?.refreshMissingModels?.(); } catch (e) { console.warn("[meshive] refreshMissingModels failed", e); }
-    // Node error outlines only clear on the next canvas redraw.
-    try { app.canvas?.setDirty?.(true, true); } catch { /* the next redraw will pick it up */ }
-}
-
-function onServerEvent(ev) {
-    const d = ev.detail;
-    if (!d?.filename) return;
-    const key = keyOf(d.directory, d.filename);
-    const prev = states.get(key);
-    if (prev?.id && d.id && prev.id !== d.id) return; // a late event from an earlier attempt
-    states.set(key, { ...(prev ?? {}), ...d, doneAt: Date.now() });
-    if (ev.type === EVT_ERROR && d.error === "cancelled") states.delete(key);
-    if (ev.type === EVT_ERROR && d.error && d.error !== "cancelled") toast("error", d.filename, d.error);
-    if (ev.type === EVT_COMPLETE) {
-        if (d.temporary) toast("warn", d.filename, T.tempNote);
-        refreshModels();
+function batchSummary() {
+    const s = { ok: 0, failed: 0, cancelled: 0, pending: 0, total: 0 };
+    for (const entry of batch.entries.values()) {
+        const st = stateOf(entry);
+        s.total++;
+        if (isDone(st)) s.ok++;
+        else if (st?.status === "error") s.failed++;
+        else if (st?.status === "cancelled") s.cancelled++;
+        else s.pending++;
     }
-    render();
+    return s;
 }
 
-// ── DOM ─────────────────────────────────────────────────────────────────────
+function retryList() {
+    return [...batch.entries.values()].filter((e) => ["error", "cancelled"].includes(stateOf(e)?.status)).map((e) => e.request);
+}
+
+// The batch finished with everything in place: say so once and drop it. (The models are loaded
+// already, so there is no "refresh the page" step.)
+function settleBatch() {
+    if (!batch) return;
+    const s = batchSummary();
+    if (s.pending || s.failed || s.cancelled) return;
+    toast("success", "Meshive", T.batchDone(s.ok));
+    batch = null;
+}
+
+// What an item in the progress area says. Unlike the file's own button it is not clickable, so no
+// "retry" in the text; the retry button sits under the list.
+function areaLabel(st) {
+    if (!st) return T.queued;
+    if (st.status === "error" || st.status === "cancelled") return T.status[st.status];
+    return labelFor(st) ?? T.queued;
+}
+
+function el(tag, style, text) {
+    const e = document.createElement(tag);
+    Object.assign(e.style, style ?? {});
+    if (text !== undefined) e.textContent = text;
+    return e;
+}
+
+function ensureProgressArea(allLine) {
+    let area = document.querySelector(`div[${MARK}="progress"]`);
+    if (!batch || !allLine) { area?.remove(); return; }
+    if (!area || area.previousElementSibling !== allLine) {
+        area?.remove();
+        area = el("div", { marginTop: "6px", borderRadius: "0.5rem", background: "var(--secondary-background, #262626)", overflow: "hidden", fontSize: "0.75rem" });
+        area.setAttribute(MARK, "progress");
+        const head = el("div", { padding: "6px 10px", display: "flex", flexWrap: "wrap", justifyContent: "space-between", gap: "2px 10px", borderBottom: "1px solid var(--border-default, #444)" });
+        head.append(el("span", { fontWeight: "600" }, T.progressTitle), el("span", { color: "var(--muted-foreground, #999)" }));
+        const items = el("div");
+        const foot = el("div", { padding: "6px 10px", display: "none", justifyContent: "flex-end" });
+        area.append(head, items, foot);
+        allLine.after(area);
+    }
+    const [head, items, foot] = area.children;
+    const s = batchSummary();
+    setText(head.lastChild, T.batch(s));
+    head.lastChild.style.color = s.failed ? "var(--destructive-background, #dc2626)" : "var(--muted-foreground, #999)";
+
+    for (const child of [...items.children]) if (!batch.entries.has(child.dataset.key)) child.remove();
+    for (const [key, entry] of batch.entries) {
+        const { request } = entry;
+        const st = stateOf(entry);
+        let item = [...items.children].find((c) => c.dataset.key === key);
+        if (!item) {
+            item = el("div", { padding: "6px 10px" });
+            item.dataset.key = key;
+            const top = el("div", { display: "flex", justifyContent: "space-between", gap: "8px" });
+            top.append(el("span", { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: "0" }, request.name),
+                el("span", { flexShrink: "0", color: "var(--muted-foreground, #999)" }));
+            const bar = el("div", { height: "4px", borderRadius: "9999px", background: "var(--secondary-background-hover, #444)", overflow: "hidden", margin: "4px 0" });
+            bar.append(el("div", { height: "100%", width: "0%", borderRadius: "9999px", transition: "width 0.2s" }));
+            const err = el("div", { color: "var(--destructive-background, #dc2626)", whiteSpace: "pre-wrap", overflowWrap: "anywhere", display: "none" });
+            item.append(top, bar, err);
+            items.append(item);
+        }
+        const [top, bar, err] = item.children;
+        const pct = st?.total ? Math.max(0, Math.min(100, st.progress || 0)) : (isDone(st) ? 100 : 0);
+        setText(top.lastChild, areaLabel(st));
+        const fill = bar.firstChild;
+        if (fill.style.width !== `${pct}%`) fill.style.width = `${pct}%`;
+        fill.style.background = st?.status === "error" ? "var(--destructive-background, #dc2626)"
+            : isDone(st) ? "var(--success-background, #16a34a)" : "var(--primary-background, #3b82f6)";
+        setText(err, st?.status === "error" ? (st.error || "") : "");
+        err.style.display = st?.status === "error" && st.error ? "block" : "none";
+    }
+
+    const retry = s.pending ? [] : retryList();
+    foot.style.display = retry.length ? "flex" : "none";
+    const label = retry.length ? (s.cancelled ? T.retryUnfinished(retry.length) : T.retryFailed(retry.length)) : "";
+    if (foot.dataset.label !== label) {
+        foot.dataset.label = label;
+        foot.replaceChildren();
+        if (retry.length) {
+            const native = document.querySelector(`button[data-testid="${ALL_TESTID}"]`);
+            const b = native ? makeButton(native, "retry") : el("button", {}, "");
+            b.textContent = label;
+            b.addEventListener("click", (e) => { e.preventDefault(); e.stopPropagation(); startBatch(retryList()); });
+            foot.append(b);
+        }
+    }
+}
+
+// ── Buttons in the Missing Models panel ─────────────────────────────────────
 function makeButton(native, kind) {
     const b = native.cloneNode(false); // copy the classes only, so it follows the theme
     b.removeAttribute("data-testid");
     b.removeAttribute("aria-label");
     b.setAttribute(MARK, kind);
     b.type = "button";
+    b.disabled = false;
     // Our text is longer than the built-in one: wrap in a narrow panel instead of clipping or
     // overflowing (the copied classes carry whitespace-nowrap and a fixed height).
     Object.assign(b.style, { whiteSpace: "normal", height: "auto", minHeight: "1.75rem", maxWidth: "100%", textAlign: "center", lineHeight: "1.2", paddingTop: "4px", paddingBottom: "4px" });
@@ -216,16 +259,17 @@ function ensureRowButtons() {
             row.after(line);
             b.addEventListener("click", (e) => {
                 e.preventDefault(); e.stopPropagation();
-                const st = states.get(b.dataset.key);
                 const cur = candidates().find((x) => keyOf(x.directory, x.name) === b.dataset.key);
+                if (!cur) return;
+                const st = current(cur.directory, cur.name);
                 if (st?.status === "paused") control("resume", st);
                 else if (isActive(st)) control("cancel", st);
-                else if (cur) startOne(cur);
+                else install(cur);
             });
         }
         const mine = line.firstElementChild;
         mine.dataset.key = keyOf(c.directory, c.name);
-        const st = freshState(mine.dataset.key);
+        const st = current(c.directory, c.name);
         const label = labelFor(st);
         const paused = st?.status === "paused";
         setText(mine, paused ? `${label} ▶` : isActive(st) ? `${label} ✕` : (label ?? T.pod));
@@ -240,9 +284,12 @@ function ensureAllButton() {
     let line = box?.nextElementSibling?.getAttribute?.(MARK) === "all" ? box.nextElementSibling : null;
     // Drop a stale line if the built-in button went away or was re-rendered.
     for (const stale of document.querySelectorAll(`div[${MARK}="all"]`)) if (stale !== line) stale.remove();
-    if (!native) return;
+    if (!native) { ensureProgressArea(null); return; }
     const cands = candidates();
-    if (!cands.length) { line?.remove(); return; }
+    // None of the batch's models is missing any more (installed, or another workflow was loaded):
+    // the progress area has nothing left to show. The downloads panel still lists them.
+    if (batch && ![...batch.entries.keys()].some((k) => cands.some((c) => keyOf(c.directory, c.name) === k))) batch = null;
+    if (!cands.length) { line?.remove(); ensureProgressArea(null); return; }
     if (!line) {
         // On the same line as the built-in "Download all" it would clip that button's text in a
         // narrow panel — use a line of its own.
@@ -252,21 +299,19 @@ function ensureAllButton() {
         const b = makeButton(native, "all-button");
         line.append(b);
         box.after(line);
-        b.addEventListener("click", async (e) => {
+        b.addEventListener("click", (e) => {
             e.preventDefault(); e.stopPropagation();
-            for (const c of candidates()) {
-                const st = freshState(keyOf(c.directory, c.name));
-                if (!isActive(st) && !isDone(st)) startOne(c); // the server runs one at a time and queues the rest
-            }
+            // The server runs one download at a time and queues the rest.
+            startBatch(candidates().filter((c) => { const st = current(c.directory, c.name); return !isActive(st) && !isDone(st); }));
         });
     }
     const mine = line.firstElementChild;
     // A paused download does not hold up the others: it is resumed from its own row.
-    const running = (st) => isActive(st) && st.status !== "paused";
-    const pending = cands.filter((c) => { const st = freshState(keyOf(c.directory, c.name)); return !isDone(st) && !isActive(st); });
-    const active = cands.filter((c) => running(states.get(keyOf(c.directory, c.name))));
+    const pending = cands.filter((c) => { const st = current(c.directory, c.name); return !isDone(st) && !isActive(st); });
+    const active = cands.filter((c) => isRunning(current(c.directory, c.name)));
     setText(mine, active.length ? `${T.podAll} (${active.length}…)` : `${T.podAll} (${pending.length})`);
     mine.disabled = active.length > 0 || pending.length === 0;
+    ensureProgressArea(line);
 }
 
 // Not requestAnimationFrame: it does not run while the tab is hidden, so progress received in the
@@ -281,16 +326,52 @@ function render() {
     }, 50);
 }
 
+function onServerEvent(ev) {
+    const d = ev.detail;
+    if (!d?.id) return;
+    debugLog(ev.type, d.filename, d.status, d.error ?? "");
+    upsert(d);
+    if (ev.type === EVT.error && d.error && d.error !== "cancelled") toast("error", d.filename, d.error);
+    if (ev.type === EVT.complete) {
+        if (d.temporary) toast("warn", d.filename, T.tempNote);
+        refreshModels(getMissingStore);
+    }
+    if (ev.type === EVT.complete || ev.type === EVT.error) settleBatch();
+}
+
+let serverInfo = null;
+
 app.registerExtension({
     name: "meshive.podDownload",
+    settings: [
+        {
+            id: SETTING.verbose,
+            category: ["Meshive", "Downloads", "Verbose logs"],
+            name: "Verbose logs",
+            tooltip: "Log download events in detail to the browser console.",
+            type: "boolean",
+            defaultValue: false,
+        },
+    ],
+    actionBarButtons: [
+        {
+            icon: "icon-[lucide--cloud-download]",
+            label: T.hub,
+            tooltip: T.hubTip,
+            class: HUB_BUTTON_CLASS,
+            onClick: () => toggleHub(serverInfo),
+        },
+    ],
     async setup() {
-        for (const t of [EVT_PROGRESS, EVT_PAUSED, EVT_RESUMED, EVT_COMPLETE, EVT_ERROR]) api.addEventListener(t, onServerEvent);
-        // After a reload, keep showing downloads that are still running or paused.
-        try {
-            const res = await api.fetchApi("/meshive/download/status");
-            // Only running ones — an old "complete" does not mean the file is still there.
-            if (res.ok) for (const st of await res.json()) if (isActive(st)) states.set(keyOf(st.directory, st.filename), st);
-        } catch { /* the buttons work without it */ }
+        for (const t of Object.values(EVT)) api.addEventListener(t, onServerEvent);
+        // After a lost connection (ComfyUI restarted, say) the events in between are gone: ask again.
+        api.addEventListener("reconnected", () => refreshAll());
+        onChange(render);
+        onReset(() => { batch = null; });
+        setInstaller(install);
+        serverInfo = await checkVersion();
+        // After a reload, pick up what the server is doing (and did) since it started.
+        await refreshAll(true);
         new MutationObserver(render).observe(document.body, { childList: true, subtree: true });
         render();
     },

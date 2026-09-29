@@ -14,6 +14,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -159,7 +160,9 @@ def body_of(resp):
     return json.loads(resp.body)
 
 
-class EngineTest(unittest.IsolatedAsyncioTestCase):
+class ServerCase(unittest.IsolatedAsyncioTestCase):
+    """A local file server and a clean engine for every test."""
+
     async def asyncSetUp(self):
         self.dir = tempfile.mkdtemp(dir=TMP)
         fp.folder_names_and_paths = {"checkpoints": ([self.dir], {".safetensors"})}
@@ -230,7 +233,8 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
     def leftovers(self):
         return [f for f in os.listdir(self.dir) if ".meshive.part" in f]
 
-    # ── tests ────────────────────────────────────────────────────────────────
+
+class EngineTest(ServerCase):
     async def test_parallel_download_verifies_and_publishes(self):
         st = await self.start(hash_="sha256:" + hashlib.sha256(self.fs.data).hexdigest())
         done = await self.wait_event(m.EVT_COMPLETE, st["id"])
@@ -629,6 +633,60 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
         st = await self.start()
         err = await self.wait_event(m.EVT_ERROR, st["id"])
         self.assertIn("404", err["error"])
+
+
+class PanelApiTest(ServerCase):
+    """Routes the downloads panel uses."""
+
+    async def test_queue_positions_and_creation_order(self):
+        self.fs.delay = 0.05
+        a = await self.start("a.safetensors")
+        b = await self.start("b.safetensors")
+        c = await self.start("c.safetensors")
+        self.assertLess(a["seq"], b["seq"])
+        self.assertLess(b["seq"], c["seq"])
+        status = {d["id"]: d for d in body_of(await m.download_status(None))}
+        self.assertEqual(status[a["id"]]["queue_position"], 0)  # running
+        self.assertEqual(status[b["id"]]["queue_position"], 1)
+        self.assertEqual(status[c["id"]]["queue_position"], 2)
+
+    async def test_clear_forgets_only_finished_downloads(self):
+        self.fs.set_data(os.urandom(200 * 1024))
+        done = await self.start("done.safetensors")
+        await self.wait_event(m.EVT_COMPLETE, done["id"])
+        self.fs.delay = 0.05
+        self.fs.set_data(os.urandom(4 * 1024**2))
+        running = await self.start("running.safetensors")
+        self.assertEqual(body_of(await m.clear_downloads(None))["cleared"], 1)
+        self.assertNotIn(done["id"], m.downloads)
+        self.assertIn(running["id"], m.downloads)
+        self.assertTrue(os.path.exists(self.dest("done.safetensors")))
+
+    async def test_info_and_scripts_are_served_uncached(self):
+        info = body_of(await m.info(None))
+        self.assertEqual(info["version"], m.__version__)
+        self.assertEqual((await m.download_status(None)).headers["X-Meshive-Boot"], info["boot"])
+        req = types.SimpleNamespace(match_info={"name": "pod_download.js"})
+        resp = await m.serve_script(req)
+        self.assertIn("no-cache", resp.headers["Cache-Control"])
+        self.assertEqual(resp.headers["X-Version"], m.__version__)
+        with self.assertRaises(web.HTTPNotFound):
+            await m.serve_script(types.SimpleNamespace(match_info={"name": "missing.js"}))
+
+    def test_versions_agree(self):
+        pyproject = re.search(r'^version = "([^"]+)"', (ROOT / "pyproject.toml").read_text(), re.M).group(1)
+        js = re.search(r'export const VERSION = "([^"]+)"', (ROOT / "web" / "meshive_core.js").read_text()).group(1)
+        self.assertEqual(m.__version__, pyproject)
+        self.assertEqual(js, pyproject)
+
+
+class FrontendStateTest(unittest.TestCase):
+    """web/meshive_core.js, through tests/test_core.mjs."""
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is not installed")
+    def test_core_state(self):
+        r = subprocess.run(["node", str(ROOT / "tests" / "test_core.mjs")], capture_output=True, text=True, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
 
 class MessageTest(unittest.TestCase):

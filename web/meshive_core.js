@@ -1,0 +1,242 @@
+import { app } from "../../scripts/app.js";
+import { api } from "../../scripts/api.js";
+
+// Shared by the Missing Models buttons (pod_download.js) and the downloads panel (meshive_hub.js):
+// server calls, the download states the server reports, texts and small helpers.
+
+export const VERSION = "1.1.0";
+
+export const EVT = {
+    progress: "meshive_download_progress",
+    paused: "meshive_download_paused",
+    resumed: "meshive_download_resumed",
+    complete: "meshive_download_complete",
+    error: "meshive_download_error",
+};
+
+export const SETTING = {
+    verbose: "Meshive.Download.VerboseLogs",
+};
+
+const ko = (() => {
+    try {
+        const loc = app.extensionManager?.setting?.get?.("Comfy.Locale") || document.documentElement.lang || navigator.language;
+        return String(loc).toLowerCase().startsWith("ko");
+    } catch { return false; }
+})();
+
+// Button names are the same in every locale; everything else follows the locale.
+export const T = ko ? {
+    pod: "Install in Meshive Pod", podAll: "Install all in Meshive Pod", hub: "Meshive",
+    hubTip: "Meshive Pod 다운로드와 설정", hubTitle: "Meshive Pod 다운로드",
+    cancel: "취소", pause: "일시정지", resume: "이어받기", retry: "다시 시도",
+    done: "Pod에 저장됨", doneTemp: "Pod에 저장됨(임시)",
+    tempNote: "이 모델 폴더는 Pod 스토리지에 없어 시스템 디스크에 저장했습니다. 지금 바로 쓸 수 있지만 Pod 가 재시작되면 사라집니다. 유지하려면 이 폴더를 덮는 볼륨을 연결하세요.",
+    queued: "대기 중", paused: "일시정지", verifying: "검증 중", waiting: "스토리지 확장 대기", failed: "실패 — 다시 시도", exists: "이미 있음",
+    status: { queued: "대기", downloading: "받는 중", waiting_storage: "공간 대기", verifying: "검증", paused: "일시정지", complete: "완료", exists: "이미 있음", error: "실패", cancelled: "취소됨" },
+    queuePos: (n) => `대기 ${n}번째`, conns: (n) => `연결 ${n}개`, temporary: "임시 저장",
+    stats: (a, t) => `진행 ${a} / 전체 ${t}`, empty: "다운로드가 없습니다.\n누락 모델 목록에서 Install in Meshive Pod 를 누르세요.",
+    refresh: "새로고침", clear: "완료 항목 지우기", close: "닫기", settings: "설정",
+    verbose: "자세한 로그", verboseTip: "브라우저 콘솔에 다운로드 이벤트를 자세히 남깁니다.",
+    progressTitle: "다운로드 진행", batch: (s) => `성공 ${s.ok}, 실패 ${s.failed}${s.cancelled ? `, 취소 ${s.cancelled}` : ""}${s.pending ? `, 남음 ${s.pending}` : ""}`,
+    retryFailed: (n) => `실패한 것 다시 받기 (${n})`, retryUnfinished: (n) => `끝나지 않은 것 다시 받기 (${n})`,
+    batchDone: (n) => `${n}개 모델이 Pod에 준비되었습니다. 바로 쓸 수 있습니다.`,
+    stale: (s, c) => `Meshive 확장의 서버(${s})와 화면(${c}) 버전이 다릅니다. 방금 업데이트했다면 ComfyUI 를 재시작한 뒤 페이지를 새로고침하세요.`,
+    podWord: "Pod",
+} : {
+    pod: "Install in Meshive Pod", podAll: "Install all in Meshive Pod", hub: "Meshive",
+    hubTip: "Meshive Pod downloads and settings", hubTitle: "Meshive Pod downloads",
+    cancel: "Cancel", pause: "Pause", resume: "Resume", retry: "Retry",
+    done: "Saved in Pod", doneTemp: "Saved in Pod (temporary)",
+    tempNote: "This model folder is not on pod storage, so the file was saved to the system disk. It works now but is lost when the pod restarts. Attach a volume that covers this folder to keep it.",
+    queued: "Queued", paused: "Paused", verifying: "Verifying", waiting: "Waiting for storage", failed: "Failed — retry", exists: "Already there",
+    status: { queued: "Queued", downloading: "Downloading", waiting_storage: "Waiting", verifying: "Verifying", paused: "Paused", complete: "Done", exists: "Already there", error: "Failed", cancelled: "Cancelled" },
+    queuePos: (n) => `#${n} in queue`, conns: (n) => `${n} connection${n === 1 ? "" : "s"}`, temporary: "temporary",
+    stats: (a, t) => `${a} active / ${t} tracked`, empty: "No downloads.\nUse Install in Meshive Pod in the missing models list.",
+    refresh: "Refresh", clear: "Clear finished", close: "Close", settings: "Settings",
+    verbose: "Verbose logs", verboseTip: "Log download events in detail to the browser console.",
+    progressTitle: "Download progress", batch: (s) => `${s.ok} succeeded, ${s.failed} failed${s.cancelled ? `, ${s.cancelled} cancelled` : ""}${s.pending ? `, ${s.pending} remaining` : ""}`,
+    retryFailed: (n) => `Retry failed (${n})`, retryUnfinished: (n) => `Retry unfinished (${n})`,
+    batchDone: (n) => `${n} model${n === 1 ? " is" : "s are"} ready in the pod.`,
+    stale: (s, c) => `The Meshive extension differs between the server (${s}) and this page (${c}). If you just updated it, restart ComfyUI, then reload the page.`,
+    podWord: "Pod",
+};
+
+export function setting(id, fallback) {
+    try { return app.extensionManager?.setting?.get?.(id) ?? fallback; } catch { return fallback; }
+}
+
+export async function setSetting(id, value) {
+    await app.extensionManager.setting.set(id, value);
+}
+
+export function debugLog(...args) {
+    if (setting(SETTING.verbose, false)) console.log("[meshive]", ...args);
+}
+
+export function toast(severity, summary, detail) {
+    try { app.extensionManager.toast.add({ severity, summary, detail, life: 8000 }); }
+    catch { console[severity === "error" ? "error" : "log"](`[meshive] ${summary}: ${detail ?? ""}`); }
+}
+
+export function fmtBytes(n) {
+    if (!n) return "0 B";
+    const u = ["B", "KB", "MB", "GB", "TB"];
+    const i = Math.min(u.length - 1, Math.floor(Math.log(n) / Math.log(1024)));
+    return `${(n / 1024 ** i).toFixed(i ? 1 : 0)} ${u[i]}`;
+}
+
+// ── Download states ─────────────────────────────────────────────────────────
+// id -> the server's state for that download. Answers without a download (the file is already
+// there, the request was refused) are kept under a local id, ordered after every server download
+// seen so far, so "the latest attempt for this file" is simply the highest `seq`.
+export const downloads = new Map();
+export const keyOf = (directory, name) => `${directory}/${name}`;
+export const isActive = (st) => !!st && ["queued", "downloading", "waiting_storage", "verifying", "paused"].includes(st.status);
+export const isRunning = (st) => isActive(st) && st.status !== "paused";
+export const isDone = (st) => !!st && ["complete", "exists"].includes(st.status);
+export const isFinished = (st) => !!st && ["complete", "exists", "error", "cancelled"].includes(st.status);
+export const isLocal = (st) => String(st?.id ?? "").startsWith("local:");
+
+let maxSeq = 0;
+let lastLocalSeq = 0;
+let localCount = 0;
+let boot = null;
+const listeners = new Set();
+const resetListeners = new Set();
+export function onChange(fn) { listeners.add(fn); }
+// Called when the server restarted: every download this page knew about is gone.
+export function onReset(fn) { resetListeners.add(fn); }
+// The highest `seq` given out so far: attempts made after this point have a higher one.
+export const seqMark = () => Math.max(maxSeq, lastLocalSeq);
+function changed() {
+    for (const fn of listeners) {
+        try { fn(); } catch (e) { console.warn("[meshive] listener failed", e); }
+    }
+}
+
+// `restored`: loaded after a page reload. A finish that happened before the reload is old news:
+// it does not mean the file is still there, so it is not shown as "Saved" on the buttons.
+export function upsert(d, restored = false) {
+    if (!d?.id) return;
+    const prev = downloads.get(d.id);
+    // A finished download stays finished on the server; an older answer arriving late (a status poll
+    // sent just before the final event) must not bring it back to life.
+    if (isFinished(prev) && !isFinished(d) && d.status) return prev;
+    const next = { ...(prev ?? {}), ...d };
+    if (isFinished(next) && !isFinished(prev)) next.doneAt = restored ? 0 : Date.now();
+    if (typeof next.seq === "number" && !isLocal(next)) maxSeq = Math.max(maxSeq, next.seq);
+    downloads.set(d.id, next);
+    changed();
+    return next;
+}
+
+// After every server download seen so far (whose seq go up by 1), and after every earlier local answer.
+function recordLocal(directory, filename, fields) {
+    lastLocalSeq = Math.max(maxSeq + 0.5, lastLocalSeq + 1e-6);
+    return upsert({ id: `local:${++localCount}`, seq: lastLocalSeq, directory, filename, ...fields });
+}
+
+export function latestFor(directory, filename) {
+    const key = keyOf(directory, filename);
+    let best = null;
+    for (const d of downloads.values()) {
+        if (keyOf(d.directory, d.filename) === key && (!best || d.seq >= best.seq)) best = d;  // ties: the later entry
+    }
+    return best;
+}
+
+// "Saved" only matters until the Missing list refreshes. If the same model is still missing after
+// that, the file is gone (deleted, or the pod moved to fresh storage) — forget it so it can be
+// installed again.
+const DONE_TTL_MS = 10000;
+export function current(directory, filename) {
+    const st = latestFor(directory, filename);
+    if (isDone(st) && Date.now() - (st.doneAt ?? 0) > DONE_TTL_MS) return undefined;
+    return st;
+}
+
+// ── Server calls ────────────────────────────────────────────────────────────
+async function post(path, body) {
+    const res = await api.fetchApi(path, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+    return { ok: res.ok, status: res.status, body: await res.json().catch(() => ({})) };
+}
+
+// Start (or join) the download of one model: {name, directory, url, hash?, hash_type?}.
+// Returns the state it ended up in.
+export async function startDownload(c) {
+    let r;
+    try {
+        r = await post("/meshive/download/start", { url: c.url, directory: c.directory, filename: c.name, hash: c.hash, hash_type: c.hash_type });
+    } catch (e) {
+        return recordLocal(c.directory, c.name, { status: "error", error: String(e) });
+    }
+    if (!r.ok) {
+        const error = r.body.error || `HTTP ${r.status}`;
+        toast("error", c.name, error);
+        return recordLocal(c.directory, c.name, { status: "error", error });
+    }
+    debugLog("start", c.name, r.body);
+    if (r.body.id) return upsert(r.body);
+    return recordLocal(c.directory, c.name, { status: r.body.status || "exists" });
+}
+
+export async function control(action, st) {
+    if (!st?.id || isLocal(st)) return;
+    try {
+        const r = await post(`/meshive/download/${action}`, { id: st.id });
+        if (!r.ok) toast("warn", st.filename ?? "", r.body.error || `HTTP ${r.status}`);
+        else if (r.body.id && r.body.filename) upsert(r.body);
+        debugLog(action, st.filename, r.body);
+    } catch (e) { toast("error", st.filename ?? "", String(e)); }
+}
+
+export async function clearFinished() {
+    try { await post("/meshive/download/clear", {}); } catch { /* the list refresh below shows what is left */ }
+    for (const [id, st] of downloads) if (isFinished(st)) downloads.delete(id);
+    changed();
+}
+
+export async function refreshAll(restored = false) {
+    try {
+        const res = await api.fetchApi("/meshive/download/status");
+        if (!res.ok) return;
+        const list = await res.json();
+        const serverBoot = res.headers.get("X-Meshive-Boot");
+        if (boot && serverBoot && serverBoot !== boot) {
+            // ComfyUI restarted: what this page knew is gone, and `seq` starts over.
+            downloads.clear();
+            maxSeq = lastLocalSeq = 0;
+            for (const fn of resetListeners) { try { fn(); } catch (e) { console.warn("[meshive] reset listener failed", e); } }
+            restored = true;
+        }
+        boot = serverBoot || boot;
+        const seen = new Set(list.map((d) => d.id));
+        for (const d of list) upsert(d, restored && !downloads.has(d.id));
+        // Not listed any more: cleared on the server (from another tab, say). The server never
+        // forgets a download that is still going, so this only drops finished ones.
+        for (const [id, st] of downloads) if (!isLocal(st) && !seen.has(id)) downloads.delete(id);
+        changed();
+    } catch { /* the buttons and the panel work without it */ }
+}
+
+// Make a new file show up in model dropdowns and drop out of the Missing list right away.
+export async function refreshModels(getMissingStore) {
+    try { await app.refreshComboInNodes?.(); } catch (e) { console.warn("[meshive] refreshComboInNodes failed", e); }
+    try { await getMissingStore()?.refreshMissingModels?.(); } catch (e) { console.warn("[meshive] refreshMissingModels failed", e); }
+    // Node error outlines only clear on the next canvas redraw.
+    try { app.canvas?.setDirty?.(true, true); } catch { /* the next redraw will pick it up */ }
+}
+
+export async function checkVersion() {
+    console.info(`[meshive] Install in Meshive Pod v${VERSION}`);
+    try {
+        const res = await api.fetchApi("/meshive/info");
+        // No such route: the server still runs a version from before it existed.
+        const info = res.ok ? await res.json() : null;
+        if (info?.version !== VERSION) toast("warn", "Meshive", T.stale(info?.version ?? "< 1.1.0", VERSION));
+        return info;
+    } catch { return null; }
+}

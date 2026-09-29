@@ -11,8 +11,12 @@ Routes (ComfyUI also registers each one under the `/api` prefix):
     POST /meshive/download/pause    {id}
     POST /meshive/download/resume   {id}
     POST /meshive/download/cancel   {id}
+    POST /meshive/download/clear    forget finished downloads
     GET  /meshive/download/status
     GET  /meshive/download/targets  read-only: where each model folder would download to
+    GET  /meshive/info              {version, host, boot}
+The extension's own scripts are served with no-cache headers (and X-Version), so an update is
+picked up on the next page load.
 
 Events on the ComfyUI websocket:
     meshive_download_progress | _paused | _resumed | _complete | _error
@@ -81,6 +85,8 @@ from aiohttp import web
 import folder_paths
 from server import PromptServer
 
+__version__ = "1.1.0"
+
 WEB_DIRECTORY = "./web"
 NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}
@@ -131,6 +137,10 @@ EVT_ERROR = "meshive_download_error"
 
 # id -> state. Lives only as long as the process; a restart leaves just the partial files.
 downloads: dict[str, dict] = {}
+# Creation order of downloads, so that a client can tell the latest attempt for a file. It starts
+# over when ComfyUI restarts; `_BOOT` tells a client that happened (the downloads it knew are gone).
+_seq = 0
+_BOOT = uuid.uuid4().hex[:12]
 # ids waiting for their turn, in order
 _queue: list[str] = []
 # id -> task of the downloads running now (at most MAX_CONCURRENT)
@@ -1099,6 +1109,7 @@ def _public(st: dict) -> dict:
         "speed": st.get("speed", 0), "error": st.get("error"),
         "path": st.get("dest_path"), "temporary": st.get("temporary", False),
         "connections": st.get("connections", 0), "resumable": st.get("resumable", False),
+        "seq": st["seq"], "queue_position": _queue.index(st["id"]) + 1 if st["id"] in _queue else 0,
     }
 
 
@@ -1143,8 +1154,10 @@ async def start_download(request):
         if st["dest_path"] == dest_path and st["status"] in ACTIVE_STATUSES:
             return web.json_response(_public(st))
 
+    global _seq
+    _seq += 1
     st = {
-        "id": uuid.uuid4().hex[:12], "url": url, "filename": filename, "directory": directory,
+        "id": uuid.uuid4().hex[:12], "seq": _seq, "url": url, "filename": filename, "directory": directory,
         "dest_path": dest_path, "part_path": f"{dest_path}.{_HOST_TAG}{PART_SUFFIX}", "managed": managed,
         "temporary": temporary, "hash": expected, "replace": replace, "status": "queued",
         "downloaded": 0, "received": 0, "total": 0, "speed": 0, "error": None, "connections": 0, "resumable": False,
@@ -1219,9 +1232,18 @@ async def cancel_download(request):
     return _bad("no such active download", 404)
 
 
+@PromptServer.instance.routes.post("/meshive/download/clear")
+async def clear_downloads(request):
+    """Forget finished downloads (complete, already there, failed, cancelled). Files are not touched."""
+    done = [did for did, st in downloads.items() if st["status"] not in ACTIVE_STATUSES]
+    for did in done:
+        del downloads[did]
+    return web.json_response({"cleared": len(done)})
+
+
 @PromptServer.instance.routes.get("/meshive/download/status")
 async def download_status(request):
-    return web.json_response([_public(s) for s in downloads.values()])
+    return web.json_response([_public(s) for s in downloads.values()], headers={"X-Meshive-Boot": _BOOT})
 
 
 @PromptServer.instance.routes.get("/meshive/download/targets")
@@ -1251,3 +1273,30 @@ async def download_targets(request):
             entry["error"] = str(e)
         out[directory] = entry
     return web.json_response({"managed_roots": roots, "host": _HOST_TAG, "targets": out})
+
+
+@PromptServer.instance.routes.get("/meshive/info")
+async def info(request):
+    return web.json_response({"version": __version__, "host": _HOST_TAG, "boot": _BOOT})
+
+
+# ComfyUI serves this folder's scripts at /extensions/<folder name>/ as static files a browser may
+# cache. Routes registered here are matched before that static route, so the scripts are served from
+# here instead, marked to be revalidated on every page load. (A folder name that would not be a plain
+# path segment keeps ComfyUI's own static route.)
+_EXT_NAME = os.path.basename(os.path.dirname(os.path.abspath(__file__)))
+_WEB_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
+
+
+async def serve_script(request):
+    path = os.path.join(_WEB_ROOT, request.match_info["name"])
+    if not os.path.isfile(path):
+        raise web.HTTPNotFound()
+    return web.FileResponse(path, headers={
+        "Cache-Control": "no-cache, must-revalidate", "Pragma": "no-cache", "Expires": "0",
+        "X-Version": __version__,
+    })
+
+
+if re.fullmatch(r"[A-Za-z0-9_.-]+", _EXT_NAME):
+    PromptServer.instance.routes.get(f"/extensions/{_EXT_NAME}/{{name:[A-Za-z0-9_.-]+\\.js}}")(serve_script)

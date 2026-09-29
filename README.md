@@ -9,7 +9,9 @@ When a workflow needs a model you don't have, ComfyUI lists it under **Missing M
 - **Install in Meshive Pod** on every missing model, and **Install all in Meshive Pod** for the whole list — ComfyUI's own Download buttons stay where they are.
 - Fast: each file is fetched over up to 8 parallel connections, and a connection that finishes early takes over part of the slowest one, so the download does not end on a single slow connection.
 - Downloads run one at a time, in the order you started them.
-- Live progress and speed on the button; click again to cancel. Downloads can be paused and resumed (see [API](#api)); a paused download frees the queue for the next one, and clicking its button resumes it.
+- Live progress and speed on the button; click again to cancel. A paused download frees the queue for the next one, and clicking its button resumes it.
+- **Install all** shows the progress of the whole batch in the Missing Models panel, with a one-click retry for anything that failed or was cancelled.
+- A **Meshive** button in the top bar opens the downloads panel: every download in the pod with progress, speed, size, connections and queue position, and Pause / Resume / Cancel / Retry for each. Its settings are also under *Settings → Meshive*.
 - The model shows up in node dropdowns as soon as it finishes, and the Missing Models entry clears.
 - Picks the right folder on Meshive storage (see below), so installed models load again after a page reload.
 - Continues where it stopped after a dropped connection, a pause, a failure or a ComfyUI restart, and waits for pod storage to grow instead of failing when the disk fills up.
@@ -64,10 +66,14 @@ The extension adds these routes to the ComfyUI server (each also under `/api`):
 | `POST` | `/meshive/download/pause` | `{id}` — stops the transfer and keeps what is on disk |
 | `POST` | `/meshive/download/resume` | `{id}` — puts it back at the front of the queue |
 | `POST` | `/meshive/download/cancel` | `{id}` — stops it and removes the partial file |
+| `POST` | `/meshive/download/clear` | forgets finished downloads (files are not touched) |
 | `GET` | `/meshive/download/status` | all downloads since ComfyUI started |
 | `GET` | `/meshive/download/targets` | which folder each model type would be saved to, and why |
+| `GET` | `/meshive/info` | `{version, host}` |
 
 Progress is sent over the ComfyUI websocket as `meshive_download_progress`, `meshive_download_paused`, `meshive_download_resumed`, `meshive_download_complete` and `meshive_download_error`.
+
+The extension's scripts are served without browser caching, so an update takes effect on the next page load; the browser console shows the version (`[meshive] Install in Meshive Pod v…`).
 
 A partial download is kept next to the target as `<file>.<pod name>.meshive.part`, with a `.state` file that records which byte ranges are already on disk.
 
@@ -87,7 +93,7 @@ Run them with a Python that has `aiohttp` (ComfyUI's own environment does).
 
 ## Acknowledgements
 
-The parallel range downloads, the download queue, pause/resume, reinstalling a file that fails its checksum and the Hugging Face access messages follow [ComfyUI-RunpodDirect](https://github.com/MadiatorLabs/ComfyUI-RunpodDirect) by Madiator2011 (GPL-3.0).
+The parallel range downloads, the download queue, pause/resume, reinstalling a file that fails its checksum, the Hugging Face access messages, the downloads panel and the install-all progress follow [ComfyUI-RunpodDirect](https://github.com/MadiatorLabs/ComfyUI-RunpodDirect) by Madiator2011 (GPL-3.0).
 
 ## License
 
