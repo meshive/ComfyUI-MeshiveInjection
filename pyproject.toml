@@ -1,0 +1,18 @@
+[project]
+name = "comfyui-meshiveinjection"
+description = "Install missing models straight into your Meshive pod: one click next to ComfyUI's Download button saves the model to the right folder on pod storage, with progress, resume and checksum verification."
+version = "0.1.0"
+license = { file = "LICENSE" }
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/meshive/ComfyUI-MeshiveInjection"
+Documentation = "https://github.com/meshive/ComfyUI-MeshiveInjection#readme"
+"Bug Tracker" = "https://github.com/meshive/ComfyUI-MeshiveInjection/issues"
+
+[tool.comfy]
+PublisherId = "meshive"
+DisplayName = "Install in Meshive Pod"
+Icon = ""

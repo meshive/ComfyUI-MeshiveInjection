@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+*.meshive.part
+.DS_Store
+.idea/
+.vscode/
