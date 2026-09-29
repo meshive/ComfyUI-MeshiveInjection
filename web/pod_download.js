@@ -13,6 +13,8 @@ import { api } from "../../scripts/api.js";
 // Re-check both whenever the frontend is upgraded. If they are gone, the extension adds nothing.
 
 const EVT_PROGRESS = "meshive_download_progress";
+const EVT_PAUSED = "meshive_download_paused";
+const EVT_RESUMED = "meshive_download_resumed";
 const EVT_COMPLETE = "meshive_download_complete";
 const EVT_ERROR = "meshive_download_error";
 const ROW_TESTID = "missing-model-download";
@@ -27,8 +29,8 @@ const ko = (() => {
 })();
 // The button text is the same in every locale; the status text follows the locale.
 const T = ko
-    ? { pod: "Install in Meshive Pod", podAll: "Install all in Meshive Pod", cancel: "취소", done: "Pod에 저장됨", doneTemp: "Pod에 저장됨(임시)", tempNote: "이 모델 폴더는 Pod 스토리지에 없어 시스템 디스크에 저장했습니다. 지금 바로 쓸 수 있지만 Pod 가 재시작되면 사라집니다. 유지하려면 이 폴더를 덮는 볼륨을 연결하세요.", queued: "대기 중", verifying: "검증 중", waiting: "스토리지 확장 대기", failed: "실패 — 다시 시도", exists: "이미 있음" }
-    : { pod: "Install in Meshive Pod", podAll: "Install all in Meshive Pod", cancel: "Cancel", done: "Saved in Pod", doneTemp: "Saved in Pod (temporary)", tempNote: "This model folder is not on pod storage, so the file was saved to the system disk. It works now but is lost when the pod restarts. Attach a volume that covers this folder to keep it.", queued: "Queued", verifying: "Verifying", waiting: "Waiting for storage", failed: "Failed — retry", exists: "Already there" };
+    ? { pod: "Install in Meshive Pod", podAll: "Install all in Meshive Pod", cancel: "취소", resume: "이어받기", done: "Pod에 저장됨", doneTemp: "Pod에 저장됨(임시)", tempNote: "이 모델 폴더는 Pod 스토리지에 없어 시스템 디스크에 저장했습니다. 지금 바로 쓸 수 있지만 Pod 가 재시작되면 사라집니다. 유지하려면 이 폴더를 덮는 볼륨을 연결하세요.", queued: "대기 중", paused: "일시정지", verifying: "검증 중", waiting: "스토리지 확장 대기", failed: "실패 — 다시 시도", exists: "이미 있음" }
+    : { pod: "Install in Meshive Pod", podAll: "Install all in Meshive Pod", cancel: "Cancel", resume: "Resume", done: "Saved in Pod", doneTemp: "Saved in Pod (temporary)", tempNote: "This model folder is not on pod storage, so the file was saved to the system disk. It works now but is lost when the pod restarts. Attach a volume that covers this folder to keep it.", queued: "Queued", paused: "Paused", verifying: "Verifying", waiting: "Waiting for storage", failed: "Failed — retry", exists: "Already there" };
 
 // key (`directory/name`) -> server state (plus a client-side error message)
 const states = new Map();
@@ -78,6 +80,7 @@ function labelFor(st) {
     if (!st) return null;
     switch (st.status) {
         case "queued": return T.queued;
+        case "paused": return st.total ? `${T.paused} · ${Math.floor(st.progress)}%` : T.paused;
         case "downloading": {
             const pct = st.total ? `${Math.floor(st.progress)}%` : fmtBytes(st.downloaded);
             return st.speed ? `${pct} · ${fmtBytes(st.speed)}/s` : pct;
@@ -91,7 +94,8 @@ function labelFor(st) {
     }
 }
 
-const isActive = (st) => st && ["queued", "downloading", "waiting_storage", "verifying"].includes(st.status);
+// Paused counts as active: the server keeps it (and its partial file) until it is resumed or cancelled.
+const isActive = (st) => st && ["queued", "downloading", "waiting_storage", "verifying", "paused"].includes(st.status);
 const isDone = (st) => st && ["complete", "exists"].includes(st.status);
 // "Saved" only matters until the Missing list refreshes. If the same model is still missing after
 // that, the file is gone (deleted, or the pod moved to fresh storage) — forget it so it can be
@@ -127,11 +131,14 @@ async function startOne(c) {
     render();
 }
 
-async function cancelOne(st) {
+async function control(action, st) {
     if (!st?.id) return;
-    await api.fetchApi("/meshive/download/cancel", {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: st.id }),
-    }).catch(() => {});
+    try {
+        const res = await api.fetchApi(`/meshive/download/${action}`, {
+            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: st.id }),
+        });
+        if (!res.ok) toast("warn", st.filename ?? "", (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`);
+    } catch (e) { toast("error", st.filename ?? "", String(e)); }
 }
 
 // Make the new file show up in model dropdowns and drop out of the Missing list right away.
@@ -211,16 +218,19 @@ function ensureRowButtons() {
                 e.preventDefault(); e.stopPropagation();
                 const st = states.get(b.dataset.key);
                 const cur = candidates().find((x) => keyOf(x.directory, x.name) === b.dataset.key);
-                if (isActive(st)) cancelOne(st); else if (cur) startOne(cur);
+                if (st?.status === "paused") control("resume", st);
+                else if (isActive(st)) control("cancel", st);
+                else if (cur) startOne(cur);
             });
         }
         const mine = line.firstElementChild;
         mine.dataset.key = keyOf(c.directory, c.name);
         const st = freshState(mine.dataset.key);
         const label = labelFor(st);
-        setText(mine, isActive(st) ? `${label} ✕` : (label ?? T.pod));
+        const paused = st?.status === "paused";
+        setText(mine, paused ? `${label} ▶` : isActive(st) ? `${label} ✕` : (label ?? T.pod));
         mine.disabled = isDone(st);
-        mine.title = st?.error || (isActive(st) ? T.cancel : `${c.directory}/${c.name}`);
+        mine.title = st?.error || (paused ? T.resume : isActive(st) ? T.cancel : `${c.directory}/${c.name}`);
     }
 }
 
@@ -246,13 +256,15 @@ function ensureAllButton() {
             e.preventDefault(); e.stopPropagation();
             for (const c of candidates()) {
                 const st = freshState(keyOf(c.directory, c.name));
-                if (!isActive(st) && !isDone(st)) startOne(c); // the server runs two at a time and queues the rest
+                if (!isActive(st) && !isDone(st)) startOne(c); // the server runs one at a time and queues the rest
             }
         });
     }
     const mine = line.firstElementChild;
-    const pending = cands.filter((c) => !isDone(freshState(keyOf(c.directory, c.name))));
-    const active = cands.filter((c) => isActive(states.get(keyOf(c.directory, c.name))));
+    // A paused download does not hold up the others: it is resumed from its own row.
+    const running = (st) => isActive(st) && st.status !== "paused";
+    const pending = cands.filter((c) => { const st = freshState(keyOf(c.directory, c.name)); return !isDone(st) && !isActive(st); });
+    const active = cands.filter((c) => running(states.get(keyOf(c.directory, c.name))));
     setText(mine, active.length ? `${T.podAll} (${active.length}…)` : `${T.podAll} (${pending.length})`);
     mine.disabled = active.length > 0 || pending.length === 0;
 }
@@ -272,8 +284,8 @@ function render() {
 app.registerExtension({
     name: "meshive.podDownload",
     async setup() {
-        for (const t of [EVT_PROGRESS, EVT_COMPLETE, EVT_ERROR]) api.addEventListener(t, onServerEvent);
-        // After a reload, keep showing downloads that are still running.
+        for (const t of [EVT_PROGRESS, EVT_PAUSED, EVT_RESUMED, EVT_COMPLETE, EVT_ERROR]) api.addEventListener(t, onServerEvent);
+        // After a reload, keep showing downloads that are still running or paused.
         try {
             const res = await api.fetchApi("/meshive/download/status");
             // Only running ones — an old "complete" does not mean the file is still there.

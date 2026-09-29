@@ -7,12 +7,14 @@ When a workflow needs a model you don't have, ComfyUI lists it under **Missing M
 ## Features
 
 - **Install in Meshive Pod** on every missing model, and **Install all in Meshive Pod** for the whole list — ComfyUI's own Download buttons stay where they are.
-- Live progress and speed on the button; click again to cancel.
+- Fast: each file is fetched over up to 8 parallel connections, and a connection that finishes early takes over part of the slowest one, so the download does not end on a single slow connection.
+- Downloads run one at a time, in the order you started them.
+- Live progress and speed on the button; click again to cancel. Downloads can be paused and resumed (see [API](#api)); a paused download frees the queue for the next one, and clicking its button resumes it.
 - The model shows up in node dropdowns as soon as it finishes, and the Missing Models entry clears.
 - Picks the right folder on Meshive storage (see below), so installed models load again after a page reload.
-- Resumes after a dropped connection, and waits for pod storage to grow instead of failing when the disk fills up.
-- Verifies the SHA-256 checksum when the workflow provides one.
-- Never overwrites an existing file. Pods that share one network volume can install the same model at the same time safely.
+- Continues where it stopped after a dropped connection, a pause, a failure or a ComfyUI restart, and waits for pod storage to grow instead of failing when the disk fills up.
+- Verifies the SHA-256 checksum when the workflow provides one. If the file is already in the folder it would install into but does not match the checksum, a new copy is downloaded, verified and swapped in (the old file is removed first only when the disk cannot hold both).
+- Otherwise never overwrites an existing file. Pods that share one network volume can install the same model at the same time safely.
 
 ## Installation
 
@@ -49,7 +51,7 @@ Some models on Hugging Face or Civitai require an account token. Set `HF_TOKEN` 
 The download runs inside your pod, so the extension is strict about what it fetches:
 
 - Only `https` URLs on `huggingface.co` and `civitai.com` (and their subdomains) are accepted.
-- Redirects are followed manually, and every connection is refused if the host resolves to a private, loopback, link-local or other non-public address.
+- Redirects are followed manually, and every connection is refused if the host is or resolves to a private, loopback, link-local or other non-public address.
 - Files are saved only into ComfyUI model folders, with a plain file name and a model file extension (`.safetensors`, `.sft`, `.ckpt`, `.pt`, `.pth`, `.bin`, `.gguf`, `.onnx`).
 
 ## API
@@ -59,16 +61,34 @@ The extension adds these routes to the ComfyUI server (each also under `/api`):
 | Method | Path | Body / result |
 |---|---|---|
 | `POST` | `/meshive/download/start` | `{url, directory, filename, hash?}` → download state |
-| `POST` | `/meshive/download/cancel` | `{id}` |
+| `POST` | `/meshive/download/pause` | `{id}` — stops the transfer and keeps what is on disk |
+| `POST` | `/meshive/download/resume` | `{id}` — puts it back at the front of the queue |
+| `POST` | `/meshive/download/cancel` | `{id}` — stops it and removes the partial file |
 | `GET` | `/meshive/download/status` | all downloads since ComfyUI started |
 | `GET` | `/meshive/download/targets` | which folder each model type would be saved to, and why |
 
-Progress is sent over the ComfyUI websocket as `meshive_download_progress`, `meshive_download_complete` and `meshive_download_error`.
+Progress is sent over the ComfyUI websocket as `meshive_download_progress`, `meshive_download_paused`, `meshive_download_resumed`, `meshive_download_complete` and `meshive_download_error`.
+
+A partial download is kept next to the target as `<file>.<pod name>.meshive.part`, with a `.state` file that records which byte ranges are already on disk.
 
 ## Compatibility
 
 Tested with ComfyUI v0.31.0 (frontend 1.48.7) and v0.37.4 (frontend 1.52.7). The buttons attach to the Missing Models list in the right-hand Errors panel; if a future frontend changes that panel, the extension adds nothing rather than breaking the page.
 
+## Development
+
+The download engine has tests that run against a local HTTP server, without ComfyUI:
+
+```bash
+python -m unittest discover -s tests
+```
+
+Run them with a Python that has `aiohttp` (ComfyUI's own environment does).
+
+## Acknowledgements
+
+The parallel range downloads, the download queue, pause/resume, reinstalling a file that fails its checksum and the Hugging Face access messages follow [ComfyUI-RunpodDirect](https://github.com/MadiatorLabs/ComfyUI-RunpodDirect) by Madiator2011 (GPL-3.0).
+
 ## License
 
-See [LICENSE](LICENSE).
+GPL-3.0 — see [LICENSE](LICENSE).
