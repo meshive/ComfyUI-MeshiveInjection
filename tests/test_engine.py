@@ -680,6 +680,66 @@ class PanelApiTest(ServerCase):
         self.assertEqual(js, pyproject)
 
 
+class TokenTest(ServerCase):
+    """A Hugging Face token typed into the page."""
+
+    async def start_hf(self, token):
+        body = {"url": "https://huggingface.co/org/repo/resolve/main/model.safetensors", "directory": "checkpoints",
+                "filename": "model.safetensors", "token": token}
+        real = m._pump
+        m._pump = lambda: None  # queued only: no network in tests
+        try:
+            return await m.start_download(Request(body))
+        finally:
+            m._pump = real
+
+    async def test_token_is_kept_for_the_download_but_never_shown(self):
+        token = "hf_" + "a" * 34
+        resp = await self.start_hf(token)
+        st = m.downloads[body_of(resp)["id"]]
+        self.assertEqual(st["token"], token)
+        self.assertNotIn(token, json.dumps(body_of(await m.download_status(None))))
+        self.assertEqual(m._auth_headers(st["url"], st["token"]), {"Authorization": f"Bearer {token}"})
+        # Only for Hugging Face: a redirect hop or another host never gets it.
+        self.assertEqual(m._auth_headers("https://civitai.com/api/download/models/1", token), {})
+
+    async def test_token_typed_later_reaches_a_queued_download(self):
+        first = body_of(await self.start_hf(""))
+        self.assertEqual(m.downloads[first["id"]]["token"], "")
+        again = body_of(await self.start_hf("hf_" + "c" * 34))
+        self.assertEqual(again["id"], first["id"])
+        self.assertEqual(m.downloads[first["id"]]["token"], "hf_" + "c" * 34)
+        # Cancelled: the pod lets go of the token.
+        await m.cancel_download(Request({"id": first["id"]}))
+        self.assertEqual(m.downloads[first["id"]]["token"], "")
+
+    async def test_malformed_token_is_refused(self):
+        resp = await self.start_hf("hf_bad token")
+        self.assertEqual(resp.status, 400)
+        self.assertNotIn("hf_bad", resp.text or "")
+
+    async def test_token_is_dropped_for_other_hosts(self):
+        body = {"url": self.url(), "directory": "checkpoints", "filename": "model.safetensors", "token": "hf_" + "b" * 34}
+        st = m.downloads[body_of(await m.start_download(Request(body)))["id"]]
+        self.assertEqual(st["token"], "")
+
+    async def test_verify_checks_its_input(self):
+        saved = {k: os.environ.pop(k, None) for k in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN")}
+        try:
+            self.assertEqual((await m.hf_verify(Request({}))).status, 400)  # no token anywhere
+            self.assertFalse(body_of(await m.hf_verify(Request({"token": "nope"})))["valid"])
+            self.assertFalse(body_of(await m.hf_status(None))["env_token"])
+        finally:
+            for k, v in saved.items():
+                if v is not None:
+                    os.environ[k] = v
+
+    async def test_access_check_only_asks_hugging_face(self):
+        async with aiohttp.ClientSession() as session:
+            self.assertEqual((await m._hf_access(session, "https://civitai.com/api/download/models/1", "hf_x"))["reason"], "not_huggingface")
+            self.assertEqual((await m._hf_access(session, "http://huggingface.co/a", "hf_x"))["reason"], "unreachable")
+
+
 class FrontendStateTest(unittest.TestCase):
     """web/meshive_core.js, through tests/test_core.mjs."""
 
@@ -698,6 +758,7 @@ class MessageTest(unittest.TestCase):
         for status in (401, 403, 451):
             e = m._http_error(self.resp(status, url), url)
             self.assertIsInstance(e, m.DownloadError)
+            self.assertEqual(e.code, "hf_auth")
             self.assertIn("https://huggingface.co/black-forest-labs/FLUX.1-dev", str(e))
             self.assertFalse(m._retryable(e))
 

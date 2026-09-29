@@ -46,7 +46,12 @@ Outside a Meshive pod, models go to ComfyUI's default folder for their type.
 
 ## Gated models
 
-Some models on Hugging Face or Civitai require an account token. Set `HF_TOKEN` (or `HUGGING_FACE_HUB_TOKEN`) and/or `CIVITAI_TOKEN` as environment variables on your pod. The token is sent only to Hugging Face / Civitai, never to the CDN they redirect to.
+Some models on Hugging Face or Civitai require an account token.
+
+- **Hugging Face, in the page:** when a missing model is gated (or a download fails for want of a token), a *Hugging Face token* box appears in the Missing Models panel. Paste a token (`hf_…`) and press **Verify**: the pod checks whom it belongs to and which of the listed files it can fetch, and links to the model pages whose terms you still need to accept. The token stays in the page only — it is sent to the pod with each Hugging Face download and never saved; **Forget** in the downloads panel drops it.
+- **In the pod environment:** set `HF_TOKEN` (or `HUGGING_FACE_HUB_TOKEN`) and/or `CIVITAI_TOKEN`. A Hugging Face token found there is checked automatically when gated models show up.
+
+A token is sent only to Hugging Face / Civitai themselves, never to the CDN they redirect to.
 
 ## Security
 
@@ -62,14 +67,16 @@ The extension adds these routes to the ComfyUI server (each also under `/api`):
 
 | Method | Path | Body / result |
 |---|---|---|
-| `POST` | `/meshive/download/start` | `{url, directory, filename, hash?}` → download state |
+| `POST` | `/meshive/download/start` | `{url, directory, filename, hash?, token?}` → download state |
 | `POST` | `/meshive/download/pause` | `{id}` — stops the transfer and keeps what is on disk |
 | `POST` | `/meshive/download/resume` | `{id}` — puts it back at the front of the queue |
 | `POST` | `/meshive/download/cancel` | `{id}` — stops it and removes the partial file |
 | `POST` | `/meshive/download/clear` | forgets finished downloads (files are not touched) |
 | `GET` | `/meshive/download/status` | all downloads since ComfyUI started |
 | `GET` | `/meshive/download/targets` | which folder each model type would be saved to, and why |
-| `GET` | `/meshive/info` | `{version, host}` |
+| `GET` | `/meshive/info` | `{version, host, boot}` |
+| `GET` | `/meshive/hf/status` | `{env_token}` — is there a Hugging Face token in the pod environment |
+| `POST` | `/meshive/hf/verify` | `{token?, urls?}` → `{valid, name, source, access}` (without `token`, checks the pod's own) |
 
 Progress is sent over the ComfyUI websocket as `meshive_download_progress`, `meshive_download_paused`, `meshive_download_resumed`, `meshive_download_complete` and `meshive_download_error`.
 
@@ -93,7 +100,7 @@ Run them with a Python that has `aiohttp` (ComfyUI's own environment does).
 
 ## Acknowledgements
 
-The parallel range downloads, the download queue, pause/resume, reinstalling a file that fails its checksum, the Hugging Face access messages, the downloads panel and the install-all progress follow [ComfyUI-RunpodDirect](https://github.com/MadiatorLabs/ComfyUI-RunpodDirect) by Madiator2011 (GPL-3.0).
+The parallel range downloads, the download queue, pause/resume, reinstalling a file that fails its checksum, the Hugging Face access messages, the downloads panel, the install-all progress and the Hugging Face token check follow [ComfyUI-RunpodDirect](https://github.com/MadiatorLabs/ComfyUI-RunpodDirect) by Madiator2011 (GPL-3.0).
 
 ## License
 

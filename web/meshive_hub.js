@@ -1,7 +1,8 @@
 import {
     T, SETTING, VERSION, downloads, isActive, isFinished, isLocal, onChange, control, clearFinished,
-    refreshAll, startDownload, fmtBytes, setting, setSetting, debugLog,
+    refreshAll, startDownload, fmtBytes, setting, setSetting, debugLog, hfState, forgetHfToken,
 } from "./meshive_core.js";
+import { resetTokenSection } from "./meshive_token.js";
 
 // The downloads panel behind the "Meshive" button in the top bar: every download the pod knows
 // about, with pause / resume / cancel / retry, and the extension's settings.
@@ -13,6 +14,7 @@ const MAX_ROWS = 60;
 let panel = null;
 let listEl = null;
 let statsEl = null;
+let tokenEl = null;
 let pollTimer = 0;
 let renderTimer = 0;
 const rows = new Map(); // download id -> row element
@@ -127,9 +129,18 @@ function updateRow(row, st) {
 
 const ORDER = { downloading: 0, waiting_storage: 0, verifying: 0, queued: 1, paused: 2, error: 3, cancelled: 4, complete: 5, exists: 5 };
 
+function renderToken() {
+    const st = hfState();
+    const src = st.hasPageToken ? "page" : st.envToken ? "env" : "none";
+    const [text, forget] = tokenEl.children;
+    setText(text, T.hfSource(src, st.name));
+    setStyle(forget, "display", st.hasPageToken ? "inline-block" : "none");
+}
+
 function render() {
     renderTimer = 0;
     if (!panel) return;
+    renderToken();
     const list = [...downloads.values()].filter((d) => !isLocal(d));
     list.sort((a, b) => (ORDER[a.status] ?? 6) - (ORDER[b.status] ?? 6)
         || (a.status === "queued" ? (a.queue_position || 0) - (b.queue_position || 0) : b.seq - a.seq));
@@ -203,7 +214,7 @@ export function closeHub() {
     clearTimeout(renderTimer);
     pollTimer = renderTimer = 0;
     panel.remove();
-    panel = listEl = statsEl = null;
+    panel = listEl = statsEl = tokenEl = null;
     rows.clear();
     document.removeEventListener("keydown", onKey);
     document.removeEventListener("pointerdown", onPointer, true);
@@ -252,6 +263,9 @@ export function openHub(info) {
     const summary = el("summary", { cursor: "pointer", fontSize: "0.75rem", fontWeight: "600" }, T.settings);
     const settingsBody = el("div", { display: "flex", flexDirection: "column", gap: "6px", paddingTop: "6px" });
     settingsBody.append(settingRow(SETTING.verbose, T.verbose, T.verboseTip));
+    tokenEl = el("div", { display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px", fontSize: "0.6875rem", color: "var(--muted-foreground, #999)" });
+    tokenEl.append(el("span"), button(T.hfForget, () => { forgetHfToken(); resetTokenSection(); }));
+    settingsBody.append(tokenEl);
     settings.append(summary, settingsBody);
 
     const footer = el("div", { display: "flex", justifyContent: "flex-end", gap: "8px" });

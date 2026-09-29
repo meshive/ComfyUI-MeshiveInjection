@@ -3,8 +3,10 @@ import { api } from "../../scripts/api.js";
 import {
     T, EVT, SETTING, keyOf, isActive, isRunning, isDone, current, latestFor, upsert, startDownload,
     control, refreshAll, refreshModels, checkVersion, toast, fmtBytes, debugLog, onChange, onReset, seqMark,
+    isHfUrl, hfEnvStatus,
 } from "./meshive_core.js";
 import { HUB_BUTTON_CLASS, toggleHub, rememberRequest, setInstaller } from "./meshive_hub.js";
+import { ensureTokenSection } from "./meshive_token.js";
 
 // ComfyUI's "Download" button in the Missing Models panel is a browser download, so the model
 // lands on the user's computer. Next to it we add "Install in Meshive Pod", which asks the
@@ -19,6 +21,8 @@ import { HUB_BUTTON_CLASS, toggleHub, rememberRequest, setInstaller } from "./me
 
 const ROW_TESTID = "missing-model-download";
 const ALL_TESTID = "missing-model-download-all";
+// The frontend's own mark on a gated Hugging Face model's row (a link to the repository).
+const GATED_TESTID = "missing-model-gated-access";
 const MARK = "data-meshive-pod";
 
 function getMissingStore() {
@@ -278,18 +282,32 @@ function ensureRowButtons() {
     }
 }
 
+// Missing Hugging Face models that need a token: gated by the frontend's mark, or refused for want of one.
+function gatedCandidates(cands) {
+    const out = [];
+    for (const native of document.querySelectorAll(`button[data-testid="${ROW_TESTID}"]`)) {
+        if (!native.parentElement?.querySelector(`[data-testid="${GATED_TESTID}"]`)) continue;
+        const c = cands.find((x) => x.name === rowModelName(native));
+        if (c && isHfUrl(c.url) && !out.includes(c)) out.push(c);
+    }
+    for (const c of cands) {
+        if (!out.includes(c) && isHfUrl(c.url) && current(c.directory, c.name)?.error_code === "hf_auth") out.push(c);
+    }
+    return out;
+}
+
 function ensureAllButton() {
     const native = document.querySelector(`button[data-testid="${ALL_TESTID}"]`);
     const box = native?.parentElement;
     let line = box?.nextElementSibling?.getAttribute?.(MARK) === "all" ? box.nextElementSibling : null;
     // Drop a stale line if the built-in button went away or was re-rendered.
     for (const stale of document.querySelectorAll(`div[${MARK}="all"]`)) if (stale !== line) stale.remove();
-    if (!native) { ensureProgressArea(null); return; }
+    if (!native) { ensureProgressArea(null); ensureTokenSection(null, []); return; }
     const cands = candidates();
     // None of the batch's models is missing any more (installed, or another workflow was loaded):
     // the progress area has nothing left to show. The downloads panel still lists them.
     if (batch && ![...batch.entries.keys()].some((k) => cands.some((c) => keyOf(c.directory, c.name) === k))) batch = null;
-    if (!cands.length) { line?.remove(); ensureProgressArea(null); return; }
+    if (!cands.length) { line?.remove(); ensureProgressArea(null); ensureTokenSection(null, []); return; }
     if (!line) {
         // On the same line as the built-in "Download all" it would clip that button's text in a
         // narrow panel — use a line of its own.
@@ -312,6 +330,8 @@ function ensureAllButton() {
     setText(mine, active.length ? `${T.podAll} (${active.length}…)` : `${T.podAll} (${pending.length})`);
     mine.disabled = active.length > 0 || pending.length === 0;
     ensureProgressArea(line);
+    const area = line.nextElementSibling?.getAttribute?.(MARK) === "progress" ? line.nextElementSibling : line;
+    ensureTokenSection(area, gatedCandidates(cands));
 }
 
 // Not requestAnimationFrame: it does not run while the tab is hidden, so progress received in the
@@ -370,6 +390,7 @@ app.registerExtension({
         onReset(() => { batch = null; });
         setInstaller(install);
         serverInfo = await checkVersion();
+        await hfEnvStatus();
         // After a reload, pick up what the server is doing (and did) since it started.
         await refreshAll(true);
         new MutationObserver(render).observe(document.body, { childList: true, subtree: true });

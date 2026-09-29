@@ -123,6 +123,42 @@ await test("an unknown or older server version is reported", async () => {
     assert.equal(toasts.length, 0);
 });
 
+await test("a verified token goes with Hugging Face downloads only, until forgotten", async () => {
+    const sent = [];
+    routes["/meshive/hf/verify"] = { valid: true, source: "page", name: "me", access: {} };
+    routes["/meshive/download/start"] = (body) => { sent.push(body); return { status: "exists" }; };
+    const token = "hf_abcdefgh12345";
+    const r = await core.hfVerify(token, []);
+    assert.equal(r.valid, true);
+    assert.equal(core.hfState().hasPageToken, true);
+    assert.equal(core.hfState().token, undefined);  // never handed out
+    await core.startDownload({ name: "a.safetensors", directory: "loras", url: "https://huggingface.co/o/r/resolve/main/a.safetensors" });
+    await core.startDownload({ name: "b.safetensors", directory: "loras", url: "https://civitai.com/api/download/models/1" });
+    core.forgetHfToken();
+    await core.startDownload({ name: "a.safetensors", directory: "loras", url: "https://huggingface.co/o/r/resolve/main/a.safetensors" });
+    assert.equal(sent[0].token, token);
+    assert.equal(sent[1].token, undefined);
+    assert.equal(sent[2].token, undefined);
+});
+
+await test("checking again without typing uses the page's token, and drops it once rejected", async () => {
+    const asked = [];
+    routes["/meshive/hf/verify"] = (body) => { asked.push(body.token); return { valid: true, source: "page", name: "me", access: {} }; };
+    await core.hfVerify("hf_pagetoken12345", []);
+    await core.hfVerify("", []);
+    assert.deepEqual(asked, ["hf_pagetoken12345", "hf_pagetoken12345"]);
+    routes["/meshive/hf/verify"] = (body) => { asked.push(body.token); return { valid: false, source: "page", code: "rejected" }; };
+    await core.hfVerify("", []);
+    assert.equal(core.hfState().hasPageToken, false);
+});
+
+await test("a rejected token is not kept", async () => {
+    routes["/meshive/hf/verify"] = { valid: false, error: "Hugging Face did not accept the token" };
+    const r = await core.hfVerify("hf_wrongtoken123", []);
+    assert.equal(r.valid, false);
+    assert.equal(core.hfState().hasPageToken, false);
+});
+
 rmSync(tmp, { recursive: true, force: true });
 let failed = 0;
 for (const [state, name, err] of results) {

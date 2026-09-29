@@ -4,7 +4,7 @@ import { api } from "../../scripts/api.js";
 // Shared by the Missing Models buttons (pod_download.js) and the downloads panel (meshive_hub.js):
 // server calls, the download states the server reports, texts and small helpers.
 
-export const VERSION = "1.1.0";
+export const VERSION = "1.2.0";
 
 export const EVT = {
     progress: "meshive_download_progress",
@@ -42,6 +42,15 @@ export const T = ko ? {
     retryFailed: (n) => `실패한 것 다시 받기 (${n})`, retryUnfinished: (n) => `끝나지 않은 것 다시 받기 (${n})`,
     batchDone: (n) => `${n}개 모델이 Pod에 준비되었습니다. 바로 쓸 수 있습니다.`,
     stale: (s, c) => `Meshive 확장의 서버(${s})와 화면(${c}) 버전이 다릅니다. 방금 업데이트했다면 ComfyUI 를 재시작한 뒤 페이지를 새로고침하세요.`,
+    hfTitle: "Hugging Face 토큰", hfGated: (n) => `게이트 모델 ${n}개`, hfVerify: "확인", hfVerifying: "확인 중…", hfForget: "잊기",
+    hfNote: "토큰은 이 페이지에만 보관되고 다운로드 요청마다 Pod 로 전달됩니다. 어디에도 저장되지 않습니다.",
+    hfBadFormat: "hf_ 로 시작하는 Hugging Face 토큰을 넣으세요.", hfEnvChecking: "Pod 환경변수 HF_TOKEN 을 확인하는 중…",
+    hfEnvInvalid: "Pod 환경변수 HF_TOKEN 이 유효하지 않습니다. 아래에 토큰을 넣으세요.",
+    hfOk: (name, src) => `${name} 계정으로 확인됨${src === "env" ? " (Pod 환경변수)" : ""}. 이제 설치할 수 있습니다.`,
+    hfNeedsTerms: (name, n) => `${name} 계정으로 확인됨 — ${n}개 모델은 약관 동의가 필요합니다. 동의한 뒤 다시 확인하세요.`,
+    hfAcceptTerms: "약관 동의", hfUnreachable: "확인 불가", hfNotFound: "없음", hfDenied: "접근 권한 없음",
+    hfErr: { rejected: "Hugging Face 가 이 토큰을 받아들이지 않았습니다. 토큰이 맞는지, 읽기 권한이 있는지 확인하세요.", format: "hf_ 로 시작하는 Hugging Face 토큰을 넣으세요.", unreachable: "Pod 에서 Hugging Face 에 연결하지 못해 토큰을 확인하지 못했습니다." },
+    hfSource: (src, name) => src === "page" ? `Hugging Face 토큰: 이 페이지 (${name})` : src === "env" ? "Hugging Face 토큰: Pod 환경변수 HF_TOKEN" : "Hugging Face 토큰: 없음",
     podWord: "Pod",
 } : {
     pod: "Install in Meshive Pod", podAll: "Install all in Meshive Pod", hub: "Meshive",
@@ -59,6 +68,15 @@ export const T = ko ? {
     retryFailed: (n) => `Retry failed (${n})`, retryUnfinished: (n) => `Retry unfinished (${n})`,
     batchDone: (n) => `${n} model${n === 1 ? " is" : "s are"} ready in the pod.`,
     stale: (s, c) => `The Meshive extension differs between the server (${s}) and this page (${c}). If you just updated it, restart ComfyUI, then reload the page.`,
+    hfTitle: "Hugging Face token", hfGated: (n) => `${n} gated model${n === 1 ? "" : "s"}`, hfVerify: "Verify", hfVerifying: "Verifying…", hfForget: "Forget",
+    hfNote: "The token stays in this page and is sent to the pod with each download. It is never saved.",
+    hfBadFormat: "Enter a Hugging Face token starting with hf_.", hfEnvChecking: "Checking HF_TOKEN from the pod environment…",
+    hfEnvInvalid: "HF_TOKEN in the pod environment is not valid. Enter a token below.",
+    hfOk: (name, src) => `Verified as ${name}${src === "env" ? " (pod environment)" : ""}. Ready to install.`,
+    hfNeedsTerms: (name, n) => `Verified as ${name} — ${n} model${n === 1 ? " needs its" : "s need their"} terms accepted. Accept, then verify again.`,
+    hfAcceptTerms: "Accept terms", hfUnreachable: "could not check", hfNotFound: "not found", hfDenied: "no access",
+    hfErr: { rejected: "Hugging Face did not accept this token. Check that it is correct and has read access.", format: "Enter a Hugging Face token starting with hf_.", unreachable: "The pod could not reach Hugging Face to check the token." },
+    hfSource: (src, name) => src === "page" ? `Hugging Face token: this page (${name})` : src === "env" ? "Hugging Face token: pod environment (HF_TOKEN)" : "Hugging Face token: none",
     podWord: "Pod",
 };
 
@@ -156,6 +174,40 @@ export function current(directory, filename) {
     return st;
 }
 
+// ── Hugging Face token ──────────────────────────────────────────────────────
+// Typed into the page: kept here only (never in storage) and sent with each Hugging Face download.
+const hf = { token: null, name: "", envToken: false };
+export const hfState = () => ({ ...hf, token: undefined, hasPageToken: !!hf.token });
+export const isHfUrl = (url) => { try { const h = new URL(url).hostname; return h === "huggingface.co" || h.endsWith(".huggingface.co"); } catch { return false; } };
+
+export function forgetHfToken() {
+    hf.token = null;
+    hf.name = "";
+    changed();
+}
+
+export async function hfEnvStatus() {
+    try {
+        const res = await api.fetchApi("/meshive/hf/status");
+        if (res.ok) hf.envToken = !!(await res.json()).env_token;
+    } catch { /* an older server: no environment check */ }
+    return hf.envToken;
+}
+
+// Check a token — the one given, else the one this page already uses, else the pod's HF_TOKEN — and
+// which of `urls` it can fetch. A valid given token is kept for the downloads that follow; the
+// page's own token is dropped if Hugging Face no longer accepts it.
+export async function hfVerify(token, urls) {
+    const use = token || hf.token || undefined;
+    let r;
+    try { r = await post("/meshive/hf/verify", { token: use, urls }); }
+    catch (e) { return { valid: false, code: "unreachable", error: String(e) }; }
+    if (!r.ok) return { valid: false, error: r.body.error || `HTTP ${r.status}` };
+    if (r.body.valid && token) { hf.token = token; hf.name = r.body.name || ""; changed(); }
+    else if (!token && use && r.body.code === "rejected") forgetHfToken();
+    return r.body;
+}
+
 // ── Server calls ────────────────────────────────────────────────────────────
 async function post(path, body) {
     const res = await api.fetchApi(path, {
@@ -169,7 +221,10 @@ async function post(path, body) {
 export async function startDownload(c) {
     let r;
     try {
-        r = await post("/meshive/download/start", { url: c.url, directory: c.directory, filename: c.name, hash: c.hash, hash_type: c.hash_type });
+        r = await post("/meshive/download/start", {
+            url: c.url, directory: c.directory, filename: c.name, hash: c.hash, hash_type: c.hash_type,
+            token: hf.token && isHfUrl(c.url) ? hf.token : undefined,
+        });
     } catch (e) {
         return recordLocal(c.directory, c.name, { status: "error", error: String(e) });
     }

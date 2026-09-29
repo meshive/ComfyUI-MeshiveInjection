@@ -7,7 +7,7 @@ no extra service: the browser already talks to ComfyUI through the pod's endpoin
 only adds a few routes.
 
 Routes (ComfyUI also registers each one under the `/api` prefix):
-    POST /meshive/download/start    {url, directory, filename, hash?, hash_type?}
+    POST /meshive/download/start    {url, directory, filename, hash?, hash_type?, token?}
     POST /meshive/download/pause    {id}
     POST /meshive/download/resume   {id}
     POST /meshive/download/cancel   {id}
@@ -15,6 +15,8 @@ Routes (ComfyUI also registers each one under the `/api` prefix):
     GET  /meshive/download/status
     GET  /meshive/download/targets  read-only: where each model folder would download to
     GET  /meshive/info              {version, host, boot}
+    GET  /meshive/hf/status         {env_token}: is there a Hugging Face token in the pod environment
+    POST /meshive/hf/verify         {token?, urls?}: who the token belongs to, and which URLs it can fetch
 The extension's own scripts are served with no-cache headers (and X-Version), so an update is
 picked up on the next page load.
 
@@ -46,6 +48,9 @@ Security (this runs inside the pod, so a server-side request forgery would reach
     (private, loopback, link-local including 169.254.169.254, cluster ranges). Checking inside
     the resolver that makes the connection leaves no DNS-rebinding gap.
   * HF_TOKEN / CIVITAI_TOKEN are sent to the first host only and dropped on cross-host redirects.
+    A Hugging Face token given with a request (typed into the page) follows the same rule, is used
+    only for huggingface.co URLs, and is kept in memory for that download only — never returned,
+    logged or written to disk.
   * A redirect to a literal non-public IP address is refused too (no name lookup happens for it).
   * Files go only into folders ComfyUI registers for models; names must be a bare file name
     with a model extension.
@@ -85,7 +90,7 @@ from aiohttp import web
 import folder_paths
 from server import PromptServer
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 WEB_DIRECTORY = "./web"
 NODE_CLASS_MAPPINGS = {}
@@ -229,11 +234,19 @@ def _validate_source_url(url: str) -> str:
     return url
 
 
-def _auth_headers(url: str) -> dict:
-    """Token for the first host only; redirect hops never call this."""
+_HF_TOKEN_RE = re.compile(r"hf_[A-Za-z0-9]{8,200}")
+
+
+def _env_hf_token() -> str:
+    return os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN") or ""
+
+
+def _auth_headers(url: str, hf_token: str = "") -> dict:
+    """Token for the first host only; redirect hops never call this. A Hugging Face token given with
+    the request goes before the one in the environment."""
     host = urlsplit(url).hostname
     if _is_host(host, "huggingface.co"):
-        token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+        token = hf_token or _env_hf_token()
     elif _is_host(host, "civitai.com"):
         token = os.environ.get("CIVITAI_TOKEN")
     else:
@@ -350,10 +363,12 @@ def _room_for_both(st: dict, total: int) -> bool:
 # ---------------------------------------------------------------------------- #
 
 class DownloadError(Exception):
-    def __init__(self, message: str, discard: bool = False):
+    def __init__(self, message: str, discard: bool = False, code: str | None = None):
         super().__init__(message)
         # The partial file cannot be continued (it would mix two versions of the file, say).
         self.discard = discard
+        # For the page: "hf_auth" when a Hugging Face token (or accepting the model's terms) would help.
+        self.code = code
 
 
 class StorageFull(DownloadError):
@@ -394,26 +409,26 @@ async def _open_with_redirects(session, url, headers, method="GET"):
     raise DownloadError("too many redirects")
 
 
-def _hf_access_message(status: int, url: str) -> str:
+def _hf_access_message(status: int, url: str, hf_token: str = "") -> str:
     repo = url.split("?", 1)[0].split("/resolve/", 1)[0]
-    has_token = bool(os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN"))
-    if status == 401 and not has_token:
-        return ("Authentication required. Set HF_TOKEN in the pod environment to a Hugging Face token with "
-                f"read access. For a gated model, first accept its access terms with the same account at {repo}")
+    if status == 401 and not (hf_token or _env_hf_token()):
+        return ("Authentication required. Enter a Hugging Face token (hf_…) in the Missing Models panel, or set "
+                f"HF_TOKEN in the pod environment. For a gated model, first accept its access terms with the same "
+                f"account at {repo}")
     if status == 401:
-        return ("Hugging Face did not accept the token in HF_TOKEN. Check that it is valid and has read access, "
-                f"and that its account has accepted the model's access terms at {repo}")
+        return ("Hugging Face did not accept the token. Check that it is valid and has read access, and that its "
+                f"account has accepted the model's access terms at {repo}")
     if status == 403:
         return ("Access denied. Check that your Hugging Face token has read access and that its account has "
                 f"accepted the model's access terms at {repo}")
     return f"Model access is restricted. Check the repository's access requirements at {repo}"
 
 
-def _http_error(resp, url: str) -> Exception:
+def _http_error(resp, url: str, hf_token: str = "") -> Exception:
     """Turn a refusal into a message the user can act on. Access errors are never retried."""
     status, host = resp.status, resp.url.host
     if status in (401, 403, 451) and _is_host(host, "huggingface.co"):
-        return DownloadError(_hf_access_message(status, url))
+        return DownloadError(_hf_access_message(status, url, hf_token), code="hf_auth")
     if status in (401, 403) and _is_host(host, "civitai.com"):
         return DownloadError(f"Civitai refused the download ({status}). This model needs an API key: "
                              "set CIVITAI_TOKEN in the pod environment.")
@@ -442,18 +457,18 @@ def _retryable(e: BaseException) -> bool:
                           aiohttp.ServerDisconnectedError, aiohttp.ClientOSError, asyncio.TimeoutError))
 
 
-async def _probe(session, url: str) -> tuple[int, bool, str]:
+async def _probe(session, url: str, hf_token: str = "") -> tuple[int, bool, str]:
     """(size, range support, ETag): HEAD first, then a one-byte range request. Size 0 means unknown."""
     total, ranges, etag = 0, False, ""
     try:
-        resp = await _open_with_redirects(session, url, _auth_headers(url), method="HEAD")
+        resp = await _open_with_redirects(session, url, _auth_headers(url, hf_token), method="HEAD")
         try:
             if resp.status == 200:
                 total = resp.content_length or 0
                 ranges = resp.headers.get("Accept-Ranges", "").lower() == "bytes"
                 etag = resp.headers.get("ETag", "")
             elif resp.status in (401, 403, 451) and _is_host(resp.url.host, "huggingface.co"):
-                raise _http_error(resp, url)  # a gated model: the range request would say the same
+                raise _http_error(resp, url, hf_token)  # a gated model: the range request would say the same
         finally:
             resp.release()
     except DownloadError:
@@ -463,7 +478,7 @@ async def _probe(session, url: str) -> tuple[int, bool, str]:
     if total and ranges:
         return total, ranges, etag
 
-    headers = _auth_headers(url)
+    headers = _auth_headers(url, hf_token)
     headers["Range"] = "bytes=0-0"
     resp = await _open_with_redirects(session, url, headers)
     try:
@@ -474,7 +489,7 @@ async def _probe(session, url: str) -> tuple[int, bool, str]:
         elif resp.status == 200:
             total, ranges = resp.content_length or total, False
         else:
-            raise _http_error(resp, url)
+            raise _http_error(resp, url, hf_token)
         etag = etag or resp.headers.get("ETag", "")
     finally:
         resp.release()
@@ -722,7 +737,7 @@ async def _fetch_range(session, st: dict, seg: dict, part: _PartFile):
     """One request for the rest of a range. Bytes count as done once they are on disk; until then
     they are the range's `inflight`, which a split never hands to another connection."""
     url, start = st["url"], seg["start"] + seg["done"]
-    headers = _auth_headers(url)
+    headers = _auth_headers(url, st["token"])
     headers["Range"] = f"bytes={start}-{seg['end']}"
     resp = await _open_with_redirects(session, url, headers)
     try:
@@ -739,7 +754,7 @@ async def _fetch_range(session, st: dict, seg: dict, part: _PartFile):
             # The server ignored Range. Writing its body here would corrupt the file.
             raise DownloadError("the server stopped honouring range requests; retry later")
         else:
-            raise _http_error(resp, url)
+            raise _http_error(resp, url, st["token"])
 
         pending = []
 
@@ -856,10 +871,10 @@ async def _fetch_stream(session, st: dict, part: _PartFile):
         try:
             await part.truncate(0)
             st["downloaded"] = 0
-            resp = await _open_with_redirects(session, url, _auth_headers(url))
+            resp = await _open_with_redirects(session, url, _auth_headers(url, st["token"]))
             try:
                 if resp.status != 200:
-                    raise _http_error(resp, url)
+                    raise _http_error(resp, url, st["token"])
                 offset, pending, plen = 0, [], 0
                 async for chunk in resp.content.iter_chunked(READ_BLOCK):
                     st["received"] += len(chunk)
@@ -1008,7 +1023,7 @@ async def _download(st: dict):
         log.warning("download %s: %s does not match the expected sha256 — downloading a new copy",
                     st["id"], dest_path)
 
-    st.update(status="downloading", error=None, speed=0)
+    st.update(status="downloading", error=None, error_code=None, speed=0)
     await _emit(EVT_PROGRESS, _public(st))
     timeout = aiohttp.ClientTimeout(total=None, connect=30, sock_read=60)
     connector = aiohttp.TCPConnector(resolver=SafeResolver(), limit=CONNECTIONS + 2)
@@ -1017,7 +1032,7 @@ async def _download(st: dict):
                                      read_bufsize=READ_BLOCK, auto_decompress=False,
                                      headers={"Accept-Encoding": "identity"}) as session:
         total, ranges, etag = await _unless_stopped(
-            st, _with_retries("size check", st, lambda: _probe(session, st["url"])))
+            st, _with_retries("size check", st, lambda: _probe(session, st["url"], st["token"])))
         # The URL answered, so a new copy can be fetched. Keep the old file until it is verified,
         # unless the disk cannot hold both.
         if st.get("mismatch") and os.path.exists(dest_path) and not _room_for_both(st, total):
@@ -1075,9 +1090,11 @@ async def _run(st: dict):
         raise
     except Exception as e:  # noqa: BLE001 — every failure is shown to the user with its reason
         log.warning("download %s failed: %s", did, e)
-        st.update(status="error", error=str(e), speed=0)
+        st.update(status="error", error=str(e), error_code=getattr(e, "code", None), speed=0)
         await _emit(EVT_ERROR, _public(st))
     finally:
+        if st["status"] not in ACTIVE_STATUSES:
+            st["token"] = ""  # done with it (a paused download keeps it for its resume)
         if _running.get(did) is asyncio.current_task():
             del _running[did]
         if not shutting_down:
@@ -1106,7 +1123,7 @@ def _public(st: dict) -> dict:
         "id": st["id"], "filename": st["filename"], "directory": st["directory"],
         "status": status, "downloaded": done, "total": total,
         "progress": (done / total * 100) if total else 0,
-        "speed": st.get("speed", 0), "error": st.get("error"),
+        "speed": st.get("speed", 0), "error": st.get("error"), "error_code": st.get("error_code"),
         "path": st.get("dest_path"), "temporary": st.get("temporary", False),
         "connections": st.get("connections", 0), "resumable": st.get("resumable", False),
         "seq": st["seq"], "queue_position": _queue.index(st["id"]) + 1 if st["id"] in _queue else 0,
@@ -1131,6 +1148,12 @@ async def start_download(request):
         if directory not in folder_paths.folder_names_and_paths:
             raise ValueError(f"unknown model directory: {directory}")
         expected = _expected_sha256(body.get("hash"), body.get("hash_type"))
+        # A Hugging Face token typed into the page: only for Hugging Face, and only while this download lives.
+        token = str(body.get("token") or "")
+        if token and not _HF_TOKEN_RE.fullmatch(token):
+            raise ValueError("that is not a Hugging Face token (hf_…)")
+        if not _is_host(urlsplit(url).hostname, "huggingface.co"):
+            token = ""
         # Already present in any folder ComfyUI searches (attached assets, legacy folder names, ...)?
         # Without a checksum there is nothing to judge it by, so it counts as installed.
         existing = folder_paths.get_full_path(directory, filename)
@@ -1150,8 +1173,11 @@ async def start_download(request):
         return _bad("invalid request body")
 
     # Same target already queued, running or paused: hand back that download instead of starting another.
+    # A token given now (typed after "Install all", say) is for it too.
     for st in downloads.values():
         if st["dest_path"] == dest_path and st["status"] in ACTIVE_STATUSES:
+            if token and not st["token"] and _is_host(urlsplit(st["url"]).hostname, "huggingface.co"):
+                st["token"] = token
             return web.json_response(_public(st))
 
     global _seq
@@ -1159,7 +1185,7 @@ async def start_download(request):
     st = {
         "id": uuid.uuid4().hex[:12], "seq": _seq, "url": url, "filename": filename, "directory": directory,
         "dest_path": dest_path, "part_path": f"{dest_path}.{_HOST_TAG}{PART_SUFFIX}", "managed": managed,
-        "temporary": temporary, "hash": expected, "replace": replace, "status": "queued",
+        "temporary": temporary, "hash": expected, "replace": replace, "token": token, "status": "queued",
         "downloaded": 0, "received": 0, "total": 0, "speed": 0, "error": None, "connections": 0, "resumable": False,
         "segments": [], "waiting": 0, "stop": asyncio.Event(), "abort": threading.Event(), "stop_reason": None,
     }
@@ -1223,7 +1249,7 @@ async def cancel_download(request):
         if st["id"] in _queue:
             _queue.remove(st["id"])
         _remove_partial(st)
-        st.update(status="cancelled", speed=0)
+        st.update(status="cancelled", speed=0, token="")
         await _emit(EVT_ERROR, {**_public(st), "error": "cancelled"})
         return web.json_response({"id": st["id"], "status": "cancelled"})
     if st["id"] in _running:
@@ -1273,6 +1299,72 @@ async def download_targets(request):
             entry["error"] = str(e)
         out[directory] = entry
     return web.json_response({"managed_roots": roots, "host": _HOST_TAG, "targets": out})
+
+
+@PromptServer.instance.routes.get("/meshive/hf/status")
+async def hf_status(request):
+    return web.json_response({"env_token": bool(_env_hf_token())})
+
+
+async def _hf_access(session, url: str, token: str) -> dict:
+    """Can this token fetch this URL? Asked the way a download would (HEAD, same redirect rules)."""
+    try:
+        _validate_source_url(url)
+        if not _is_host(urlsplit(url).hostname, "huggingface.co"):
+            return {"accessible": False, "reason": "not_huggingface"}
+        resp = await _open_with_redirects(session, url, _auth_headers(url, token), method="HEAD")
+    except (ValueError, DownloadError, aiohttp.ClientError, asyncio.TimeoutError, OSError):
+        return {"accessible": False, "reason": "unreachable"}
+    try:
+        repo = url.split("?", 1)[0].split("/resolve/", 1)[0]
+        if resp.status == 200:
+            return {"accessible": True}
+        if resp.status in (401, 403, 451):
+            # GatedRepo: the account has not accepted the model's terms (or is waiting for approval).
+            gated = resp.headers.get("X-Error-Code") == "GatedRepo" or resp.status == 403
+            return {"accessible": False, "reason": "terms" if gated else "denied", "repo": repo}
+        if resp.status == 404:
+            return {"accessible": False, "reason": "not_found", "repo": repo}
+        return {"accessible": False, "reason": f"http_{resp.status}", "repo": repo}
+    finally:
+        resp.release()
+
+
+@PromptServer.instance.routes.post("/meshive/hf/verify")
+async def hf_verify(request):
+    """Check a Hugging Face token (the one given, else the pod's HF_TOKEN) and what it can fetch."""
+    try:
+        body = await request.json()
+        token = str(body.get("token") or "")
+        urls = [u for u in (body.get("urls") or []) if isinstance(u, str)][:16]
+    except Exception:
+        return _bad("invalid request body")
+    source = "page"
+    if not token:
+        token, source = _env_hf_token(), "env"
+    if not token:
+        return _bad("no Hugging Face token")
+    if not _HF_TOKEN_RE.fullmatch(token):
+        return web.json_response({"valid": False, "source": source, "code": "format",
+                                  "error": "that is not a Hugging Face token (hf_…)"})
+    timeout = aiohttp.ClientTimeout(total=20)
+    connector = aiohttp.TCPConnector(resolver=SafeResolver(), limit=8)
+    async with aiohttp.ClientSession(connector=connector, timeout=timeout, trust_env=False) as session:
+        try:
+            async with session.get("https://huggingface.co/api/whoami-v2",
+                                   headers={"Authorization": f"Bearer {token}"}, allow_redirects=False) as resp:
+                if resp.status == 401:
+                    return web.json_response({"valid": False, "source": source, "code": "rejected",
+                                              "error": "Hugging Face did not accept the token"})
+                if resp.status != 200:
+                    return web.json_response({"valid": False, "source": source, "code": "unreachable",
+                                              "error": f"could not check the token (HTTP {resp.status})"})
+                name = (await resp.json()).get("name") or ""
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError) as e:
+            return web.json_response({"valid": False, "source": source, "code": "unreachable",
+                                      "error": f"could not reach Hugging Face ({e})"})
+        access = await asyncio.gather(*(_hf_access(session, u, token) for u in urls))
+    return web.json_response({"valid": True, "source": source, "name": name, "access": dict(zip(urls, access))})
 
 
 @PromptServer.instance.routes.get("/meshive/info")
