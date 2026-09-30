@@ -5,7 +5,7 @@ import {
     control, refreshAll, refreshModels, checkVersion, toast, fmtBytes, debugLog, onChange, onReset, seqMark,
     isHfUrl, hfEnvStatus, setting, sizesOf,
 } from "./meshive_core.js";
-import { HUB_BUTTON_CLASS, toggleHub, openHub, rememberRequest, setInstaller } from "./meshive_hub.js";
+import { HUB_BUTTON_CLASS, HUB_ICON_CLASS, installHubBranding, toggleHub, openHub, rememberRequest, setInstaller } from "./meshive_hub.js";
 import { ensureTokenSection } from "./meshive_token.js";
 import { seedWorkflow, folderChoices, choiceKey, preloadManagerModels } from "./meshive_detect.js";
 import { syncGuard, invalidateGuardCache } from "./meshive_guard.js";
@@ -531,7 +531,7 @@ app.registerExtension({
     ],
     actionBarButtons: [
         {
-            icon: "icon-[lucide--cloud-download]",
+            icon: HUB_ICON_CLASS,
             label: T.hub,
             tooltip: T.hubTip,
             class: HUB_BUTTON_CLASS,
@@ -547,6 +547,7 @@ app.registerExtension({
         } catch (e) { console.warn("[meshive] workflow scan failed", e); }
     },
     async setup() {
+        installHubBranding();
         for (const t of Object.values(EVT)) api.addEventListener(t, onServerEvent);
         preloadManagerModels(); // in the background: ComfyUI-Manager's model list, when it is installed
         window.addEventListener("focus", autoCheck);

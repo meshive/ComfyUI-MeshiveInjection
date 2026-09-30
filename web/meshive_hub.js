@@ -9,8 +9,24 @@ import { resetTokenSection } from "./meshive_token.js";
 // about, with pause / resume / cancel / retry, and the extension's settings.
 
 export const HUB_BUTTON_CLASS = "meshive-hub-btn";
+export const HUB_ICON_CLASS = "meshive-brand-icon";
+const LOGO_URL = new URL("./meshive-logo.svg", import.meta.url).href;
 const POLL_MS = 3000;
 const MAX_ROWS = 60;
+
+export function installHubBranding() {
+    if (document.getElementById("meshive-hub-branding")) return;
+    const style = document.createElement("style");
+    style.id = "meshive-hub-branding";
+    style.textContent = `.${HUB_ICON_CLASS} {
+        display: inline-block;
+        width: 20px;
+        height: 20px;
+        flex-shrink: 0;
+        background: url(${JSON.stringify(LOGO_URL)}) center / contain no-repeat;
+    }`;
+    document.head.append(style);
+}
 
 let panel = null;
 let listEl = null;
@@ -283,7 +299,14 @@ export function openHub(info) {
     const x = button("×", closeHub);
     x.setAttribute("aria-label", T.close);
     Object.assign(x.style, { border: "none", background: "transparent", fontSize: "1rem" });
-    header.append(title, x);
+    const brand = el("div", { display: "flex", alignItems: "center", gap: "8px", minWidth: "0" });
+    const logo = document.createElement("img");
+    logo.src = LOGO_URL;
+    logo.alt = "";
+    logo.setAttribute("aria-hidden", "true");
+    Object.assign(logo.style, { width: "24px", height: "24px", flexShrink: "0" });
+    brand.append(logo, title);
+    header.append(brand, x);
 
     const body = el("div", { padding: "10px 12px", display: "flex", flexDirection: "column", gap: "8px", minHeight: "0", overflow: "hidden" });
     const card = el("div", { border: "1px solid var(--border-subtle, #333)", borderRadius: "0.5rem", background: "var(--secondary-background, #262626)", display: "flex", flexDirection: "column", minHeight: "0", overflow: "hidden" });
