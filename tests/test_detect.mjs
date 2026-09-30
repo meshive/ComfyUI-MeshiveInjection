@@ -157,6 +157,118 @@ await test("the check before a run looks at the live graph's model pickers only"
     assert.equal(by["flux-inner.safetensors"].hint, "diffusion_models");
 });
 
+await test("an entirely unknown folder retains the URL and offers every registered model folder", async () => {
+    missingOnServer = new Set(["weights.safetensors"]);
+    const url = "https://huggingface.co/a/b/resolve/main/weights.safetensors";
+    for (const embedded of [false, true]) {
+        const wf = { nodes: [node(1, "CustomWeightsLoader", ["weights.safetensors"], {
+            properties: embedded ? { models: [{ name: "weights.safetensors", url }] } : {},
+        }), node(2, "Note", [url])] };
+        const [model] = await d.seedWorkflow(wf, categoryFor);
+        assert.equal(model.url, url);
+        assert.equal(model.directory, null);
+        const choice = d.folderChoices.get(d.choiceKey(model.name, model.url));
+        assert.equal(choice.directory, null);
+        assert.ok(choice.options.includes("checkpoints") && choice.options.includes("loras"));
+        assert.equal(d.discoveredModels.get(d.choiceKey(model.name, model.url)), model);
+        assert.deepEqual(await d.seedWorkflow(wf, categoryFor), [model]);
+        assert.equal(wf.models.length, 1); // repeated scans do not append duplicates
+    }
+});
+
+await test("a late Manager list supplements the configured graph without reopening it", async () => {
+    const fresh = await import(pathToFileURL(join(tmp, "extensions", "meshive", "meshive_detect.js")) + "?late-manager");
+    const real = globalThis.__api.fetchApi;
+    let release;
+    const delayed = new Promise((r) => { release = r; });
+    globalThis.__api.fetchApi = (path, opts) => path.startsWith("/externalmodel/getlist")
+        ? delayed : real(path, opts);
+    try {
+        missingOnServer = new Set(["late.safetensors"]);
+        let wf = { nodes: [node(1, "VAELoader", ["late.safetensors"])] };
+        const applied = [];
+        const linker = fresh.createWorkflowLinker(categoryFor, () => wf, (m) => applied.push(...m));
+        const loading = fresh.preloadManagerModels().then(() => linker.managerLoaded());
+        assert.deepEqual(await linker.beforeConfigure(wf), []);
+        await linker.afterConfigure();
+        release({ ok: true, json: async () => ({ models: [{ filename: "late.safetensors",
+            url: "https://huggingface.co/a/b/resolve/main/late.safetensors", type: "vae" }] }) });
+        await loading;
+        assert.equal(applied.length, 1);
+        assert.equal(applied[0].directory, "vae");
+        const native = [{ name: "late.safetensors", directory: "vae", isMissing: true, nodeId: 1, widgetName: "vae_name" }];
+        const enriched = fresh.enrichMissingCandidates(native, applied);
+        assert.equal(enriched[0].url, applied[0].url);
+        assert.equal(enriched[0].nodeId, 1);
+        // Metadata remains on the live node for the frontend's next refresh or save.
+        const graph = { _nodes: [{ type: "VAELoader", widgets: [{ type: "combo", value: "late.safetensors" }], properties: {} }] };
+        fresh.attachModelMetadata(graph, applied, categoryFor);
+        fresh.attachModelMetadata(graph, applied, categoryFor);
+        assert.deepEqual(graph._nodes[0].properties.models, applied);
+    } finally { globalThis.__api.fetchApi = real; }
+});
+
+await test("Manager completion during configuration waits for the graph to be ready", async () => {
+    missingOnServer = new Set(["mystery_lora.safetensors"]);
+    const wf = { nodes: [node(1, "CustomWeightsLoader", ["mystery_lora.safetensors"])] };
+    const applied = [];
+    const linker = d.createWorkflowLinker(categoryFor, () => wf, (m) => applied.push(...m));
+    await linker.managerLoaded();
+    assert.equal(applied.length, 0);
+    await linker.beforeConfigure(wf);
+    // Simulate the live snapshot, whose root metadata may not be serialized by ComfyUI.
+    delete wf.models;
+    await linker.afterConfigure();
+    assert.equal(applied.length, 1);
+});
+
+await test("a delayed Manager supplement cannot leak links or folder choices into another graph", async () => {
+    const fresh = await import(pathToFileURL(join(tmp, "extensions", "meshive", "meshive_detect.js")) + "?stale-manager");
+    managerList = [{ filename: "stale_lora.safetensors", url: "https://huggingface.co/a/b/resolve/main/stale_lora.safetensors", type: "lora" }];
+    await fresh.preloadManagerModels();
+    const real = globalThis.__api.fetchApi;
+    let release;
+    let applied = 0;
+    let wf = { nodes: [] };
+    const linker = fresh.createWorkflowLinker(categoryFor, () => wf, () => applied++);
+    try {
+        await linker.beforeConfigure(wf);
+        await linker.afterConfigure();
+        globalThis.__api.fetchApi = (path, opts) => path === "/meshive/models/check"
+            ? new Promise((r) => { release = r; }) : real(path, opts);
+        wf = { nodes: [node(1, "CustomWeightsLoader", ["stale_lora.safetensors"])] };
+        const old = wf;
+        const pending = linker.managerLoaded();
+        while (!release) await new Promise((r) => setImmediate(r));
+        wf = { nodes: [] };
+        await linker.beforeConfigure(wf);
+        release({ ok: true, json: async () => ({ missing: [{ filename: "stale_lora.safetensors" }], unresolved: [] }) });
+        await pending;
+        assert.equal(applied, 0);
+        assert.equal(fresh.folderChoices.size, 0);
+        assert.equal(fresh.discoveredModels.size, 0);
+        assert.equal(old.models, undefined);
+        assert.equal(wf.models, undefined);
+    } finally { globalThis.__api.fetchApi = real; }
+});
+
+await test("candidate enrichment preserves existing links and separate model directories", async () => {
+    const list = [
+        { name: "same.gguf", url: "https://huggingface.co/user/model", directory: "vae", isMissing: true },
+        { name: "same.gguf", directory: "loras", nodeId: 2, isMissing: true },
+        { name: "same.gguf", directory: "vae", nodeId: 3, isMissing: false },
+        { name: "unknown.gguf", directory: null, nodeId: 4, isMissing: true },
+    ];
+    const models = [{ name: "same.gguf", directory: "vae", url: "https://huggingface.co/fallback/model" },
+        { name: "unknown.gguf", directory: null, url: "https://huggingface.co/fallback/unknown" }];
+    const enriched = d.enrichMissingCandidates(list, models);
+    assert.equal(enriched[0], list[0]);
+    assert.equal(enriched[1], list[1]);
+    assert.equal(enriched[2], list[2]);
+    assert.equal(enriched[3].url, models[1].url);
+    assert.equal(enriched[3].directory, null);
+});
+
 rmSync(tmp, { recursive: true, force: true });
 let failed = 0;
 for (const [state, name, err] of results) {

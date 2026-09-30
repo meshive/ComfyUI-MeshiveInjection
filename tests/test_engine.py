@@ -17,6 +17,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import patch
 import time
 import types
 import unittest
@@ -940,6 +943,55 @@ class PodHelpersTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([s.pings for s in socks.values()], [1, 0, 0])
 
 
+class PublishTest(unittest.TestCase):
+    def test_hardlink_fallback_has_only_one_winner(self):
+        with tempfile.TemporaryDirectory() as directory:
+            dest = Path(directory) / "model.safetensors"
+            parts = [Path(directory) / f"pod-{i}.part" for i in range(8)]
+            for i, part in enumerate(parts):
+                part.write_bytes(f"complete model {i}".encode())
+            barrier = threading.Barrier(len(parts))
+
+            def no_links(*args):
+                barrier.wait(timeout=5)
+                raise OSError(errno.ENOTSUP, "hard links unavailable")
+
+            with patch.object(m.os, "link", side_effect=no_links), ThreadPoolExecutor(max_workers=8) as pool:
+                winners = list(pool.map(lambda part: m._publish(str(part), str(dest)), parts))
+            self.assertEqual(sum(winners), 1)
+            self.assertEqual(dest.read_bytes(), f"complete model {winners.index(True)}".encode())
+            self.assertTrue(all(not part.exists() for part in parts))
+
+    def test_fallback_preserves_existing_files_and_dangling_symlinks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            dest = Path(directory) / "model.safetensors"
+            part = Path(directory) / "pod.part"
+            dest.write_bytes(b"existing model")
+            with patch.object(m.os, "link", side_effect=OSError(errno.EPERM, "no hard links")):
+                part.write_bytes(b"new model")
+                self.assertFalse(m._publish(str(part), str(dest)))
+                self.assertEqual(dest.read_bytes(), b"existing model")
+                self.assertFalse(part.exists())
+                if hasattr(os, "symlink") and os.name != "nt":
+                    dest.unlink()
+                    dest.symlink_to(Path(directory) / "absent")
+                    part.write_bytes(b"new model")
+                    self.assertFalse(m._publish(str(part), str(dest)))
+                    self.assertTrue(dest.is_symlink())
+                    self.assertFalse(part.exists())
+
+    def test_unsupported_atomic_publish_keeps_the_completed_partial(self):
+        with tempfile.TemporaryDirectory() as directory:
+            part, dest = Path(directory) / "pod.part", Path(directory) / "model.safetensors"
+            part.write_bytes(b"complete model")
+            with patch.object(m.os, "link", side_effect=OSError(errno.ENOTSUP, "no links")), \
+                    patch.object(m, "_rename_noreplace", side_effect=OSError(errno.ENOTSUP, "no rename")):
+                with self.assertRaisesRegex(m.DownloadError, "completed partial file was kept"):
+                    m._publish(str(part), str(dest))
+            self.assertEqual(part.read_bytes(), b"complete model")
+            self.assertFalse(dest.exists())
+
+
 class FrontendStateTest(unittest.TestCase):
     """web/meshive_core.js, through tests/test_core.mjs."""
 
@@ -951,6 +1003,13 @@ class FrontendStateTest(unittest.TestCase):
     @unittest.skipUnless(shutil.which("node"), "Node.js is not installed")
     def test_workflow_scan(self):
         r = subprocess.run(["node", str(ROOT / "tests" / "test_detect.mjs")], capture_output=True, text=True, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is not installed")
+    def test_missing_model_buttons(self):
+        r = subprocess.run(["node", str(ROOT / "tests" / "test_buttons.mjs")], capture_output=True, text=True, timeout=120)
+        if r.returncode == 77:
+            self.skipTest(r.stdout.strip())
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
 

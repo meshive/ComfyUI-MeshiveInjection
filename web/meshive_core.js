@@ -4,7 +4,7 @@ import { api } from "../../scripts/api.js";
 // Shared by the Missing Models buttons (pod_download.js) and the downloads panel (meshive_hub.js):
 // server calls, the download states the server reports, texts and small helpers.
 
-export const VERSION = "1.4.0";
+export const VERSION = "1.4.1";
 
 export const EVT = {
     progress: "meshive_download_progress",
@@ -30,7 +30,7 @@ const ko = (() => {
 
 // Button names are the same in every locale; everything else follows the locale.
 export const T = ko ? {
-    pod: "Install in Meshive Pod", podAll: "Install all in Meshive Pod", hub: "Meshive",
+    pod: "Install in Meshive Pod", podAll: "Install all in Meshive Pod", hub: "Meshive", download: "다운로드", chooseFolder: "저장할 모델 폴더를 선택하세요",
     hubTip: "Meshive Pod 다운로드와 설정", hubTitle: "Meshive Pod 다운로드",
     cancel: "취소", pause: "일시정지", resume: "이어받기", retry: "다시 시도",
     done: "Pod에 저장됨", doneTemp: "Pod에 저장됨(임시)",
@@ -72,7 +72,7 @@ export const T = ko ? {
     memLocked: "Pod 환경변수 COMFYUI_MESHIVEINJECTION_NO_RAM_PATCH 로 꺼져 있습니다.",
     podWord: "Pod",
 } : {
-    pod: "Install in Meshive Pod", podAll: "Install all in Meshive Pod", hub: "Meshive",
+    pod: "Install in Meshive Pod", podAll: "Install all in Meshive Pod", hub: "Meshive", download: "Download", chooseFolder: "Choose a model folder",
     hubTip: "Meshive Pod downloads and settings", hubTitle: "Meshive Pod downloads",
     cancel: "Cancel", pause: "Pause", resume: "Resume", retry: "Retry",
     done: "Saved in Pod", doneTemp: "Saved in Pod (temporary)",

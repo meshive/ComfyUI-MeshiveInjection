@@ -7,7 +7,7 @@ import {
 } from "./meshive_core.js";
 import { HUB_BUTTON_CLASS, HUB_ICON_CLASS, installHubBranding, toggleHub, openHub, rememberRequest, setInstaller } from "./meshive_hub.js";
 import { ensureTokenSection } from "./meshive_token.js";
-import { seedWorkflow, folderChoices, choiceKey, preloadManagerModels } from "./meshive_detect.js";
+import { folderChoices, discoveredModels, choiceKey, preloadManagerModels, createWorkflowLinker, enrichMissingCandidates, attachModelMetadata } from "./meshive_detect.js";
 import { syncGuard, invalidateGuardCache } from "./meshive_guard.js";
 
 // ComfyUI's "Download" button in the Missing Models panel is a browser download, so the model
@@ -52,14 +52,14 @@ const folderOverrides = new Map();
 
 function candidates() {
     const store = getMissingStore();
-    const list = store?.missingModelCandidates ?? [];
+    const list = enrichMissingCandidates(store?.missingModelCandidates ?? [], [...discoveredModels.values()]);
     const seen = new Set();
     const out = [];
     for (let c of list) {
-        if (!c?.isMissing || !c.url || !c.directory || !c.name) continue;
+        if (!c?.isMissing || !c.url || !c.name) continue;
         // A picked folder applies everywhere: the button, its progress, "Install all".
         const picked = folderOverrides.get(choiceKey(c.name, c.url));
-        if (picked) c = { ...c, directory: picked, guessedDirectory: c.directory };
+        if (picked !== undefined) c = { ...c, directory: picked || null, guessedDirectory: c.directory };
         const k = keyOf(c.directory, c.name);
         if (seen.has(k)) continue;
         seen.add(k);
@@ -87,6 +87,7 @@ function labelFor(st) {
 }
 
 async function install(c) {
+    if (!c.directory) { toast("warn", c.name, T.chooseFolder); return null; }
     rememberRequest(c);
     const st = await startDownload(c);
     if (st?.status === "exists") await refreshModels(getMissingStore);
@@ -100,6 +101,7 @@ async function install(c) {
 let batch = null; // {since, entries: Map key -> {request, floor, last}}
 
 async function startBatch(list) {
+    list = list.filter((c) => c.directory);
     if (!list.length) return;
     const since = seqMark();
     batch = { since, entries: new Map(list.map((c) => [keyOf(c.directory, c.name), { request: c, floor: since, last: null }])) };
@@ -293,28 +295,32 @@ function ensureRowButtons() {
         const label = labelFor(st);
         const paused = st?.status === "paused";
         setText(mine, paused ? `${label} ▶` : isActive(st) ? `${label} ✕` : (label ?? T.pod));
-        mine.disabled = isDone(st);
-        mine.title = st?.error || (paused ? T.resume : isActive(st) ? T.cancel : `${c.directory}/${c.name}`);
+        mine.disabled = !c.directory || isDone(st);
+        mine.title = !c.directory ? T.chooseFolder : st?.error || (paused ? T.resume : isActive(st) ? T.cancel : `${c.directory}/${c.name}`);
     }
     ensureRowsWithoutDownload(cands);
 }
 
-// The frontend offers its Download button only for some file types (not .gguf, say). Those rows still
-// get ours, on a line of their own under the row, like the others.
+// Add a browser Download action when the frontend omits one (.gguf or an unknown folder).
+// The pod action stays on its own line, just as it does for native Download rows.
 function ensureRowsWithoutDownload(cands) {
     const served = new Set([...document.querySelectorAll(`button[data-testid="${ROW_TESTID}"]`)].map(rowModelName));
     const wanted = new Map();
     for (const c of cands) {
         if (served.has(c.name)) continue;
-        const nameBtn = [...document.querySelectorAll("button[title]")].find((b) => b.title === c.name && b.closest("div")?.querySelector('[data-testid="missing-model-locate"]'));
+        const nameBtn = [...document.querySelectorAll("button[title], span[title]")].find((b) => b.title === c.name);
         const row = nameBtn?.closest("div");
         if (row) wanted.set(row, c);
+    }
+    for (const link of document.querySelectorAll(`a[${MARK}="browser-download"]`)) {
+        if (!wanted.has(link.parentElement)) link.remove();
     }
     for (const line of document.querySelectorAll(`div[${MARK}="row-alt"]`)) {
         if (!wanted.has(line.previousElementSibling)) line.remove();
     }
     const template = document.querySelector(`button[data-testid="${ALL_TESTID}"]`) ?? document.querySelector(`button[data-testid="${ROW_TESTID}"]`);
     for (const [row, c] of wanted) {
+        ensureBrowserDownload(row, c, template);
         let line = row.nextElementSibling?.getAttribute?.(MARK) === "row-alt" ? row.nextElementSibling : null;
         if (!line) {
             line = document.createElement("div");
@@ -342,9 +348,36 @@ function ensureRowsWithoutDownload(cands) {
         const label = labelFor(st);
         const paused = st?.status === "paused";
         setText(mine, paused ? `${label} ▶` : isActive(st) ? `${label} ✕` : (label ?? T.pod));
-        mine.disabled = isDone(st);
-        mine.title = st?.error || (paused ? T.resume : isActive(st) ? T.cancel : `${c.directory}/${c.name}`);
+        mine.disabled = !c.directory || isDone(st);
+        mine.title = !c.directory ? T.chooseFolder : st?.error || (paused ? T.resume : isActive(st) ? T.cancel : `${c.directory}/${c.name}`);
     }
+}
+
+function ensureBrowserDownload(row, c, template) {
+    let link = row.querySelector(`a[${MARK}="browser-download"]`);
+    // Match the pod's initial-host policy; never turn workflow text into an executable URL.
+    let url;
+    try {
+        url = new URL(c.url);
+        if (url.protocol !== "https:" || url.username || url.password
+            || !["huggingface.co", "civitai.com"].some((host) => url.hostname === host || url.hostname.endsWith(`.${host}`))) throw new Error("unsupported URL");
+    } catch { link?.remove(); return; }
+    if (!link) {
+        link = document.createElement("a");
+        link.setAttribute(MARK, "browser-download");
+        link.className = (document.querySelector(`button[data-testid="${ROW_TESTID}"]`) ?? template)?.className ?? "";
+        Object.assign(link.style, { display: "inline-flex", alignItems: "center", justifyContent: "center", flexShrink: "0", width: "auto", whiteSpace: "normal",
+            padding: "4px 8px", borderRadius: "0.375rem", background: "var(--secondary-background, #333)",
+            color: "var(--base-foreground, #eee)", fontSize: "0.75rem", textDecoration: "none" });
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.addEventListener("click", (e) => e.stopPropagation());
+        row.append(link);
+    }
+    if (link.href !== url.href) link.href = url.href;
+    link.download = c.name.replace(/\\/g, "/").split("/").pop();
+    link.setAttribute("aria-label", `${T.download} ${c.name}`);
+    setText(link, T.download);
 }
 
 // A model whose folder we could only guess gets a folder choice in front of its button.
@@ -356,14 +389,21 @@ function ensureFolderPicker(line, c) {
     if (!select) {
         select = document.createElement("select");
         select.title = T.folder;
+        select.setAttribute("aria-label", `${T.folder}: ${c.name}`);
         Object.assign(select.style, { marginRight: "6px", maxWidth: "45%", fontSize: "0.75rem", borderRadius: "0.375rem",
             background: "var(--base-background, #1e1e1e)", color: "var(--base-foreground, #eee)", border: "1px solid var(--border-default, #444)" });
+        select.append(new Option(T.chooseFolder, ""));
         for (const dir of choice.options) select.append(new Option(dir, dir));
         select.addEventListener("click", (e) => e.stopPropagation());
-        select.addEventListener("change", () => { folderOverrides.set(key, select.value); render(); });
+        select.addEventListener("change", () => {
+            folderOverrides.set(key, select.value);
+            if (select.value) attachModelMetadata(app.rootGraph ?? app.graph, [{ ...c, directory: select.value }], categoryFor);
+            invalidateGuardCache();
+            render();
+        });
         line.prepend(select);
     }
-    const want = folderOverrides.get(key) ?? choice.directory;
+    const want = folderOverrides.get(key) ?? choice.directory ?? "";
     if (select.value !== want) select.value = want;
 }
 
@@ -431,12 +471,12 @@ function ensureAllButton() {
         b.addEventListener("click", (e) => {
             e.preventDefault(); e.stopPropagation();
             // The server runs one download at a time and queues the rest.
-            startBatch(candidates().filter((c) => { const st = current(c.directory, c.name); return !isActive(st) && !isDone(st); }));
+            startBatch(candidates().filter((c) => { const st = current(c.directory, c.name); return c.directory && !isActive(st) && !isDone(st); }));
         });
     }
     const mine = line.firstElementChild;
     // A paused download does not hold up the others: it is resumed from its own row.
-    const pending = cands.filter((c) => { const st = current(c.directory, c.name); return !isDone(st) && !isActive(st); });
+    const pending = cands.filter((c) => { const st = current(c.directory, c.name); return c.directory && !isDone(st) && !isActive(st); });
     const active = cands.filter((c) => isRunning(current(c.directory, c.name)));
     setText(mine, active.length ? `${T.podAll} (${active.length}…)` : `${T.podAll} (${pending.length})`);
     mine.disabled = active.length > 0 || pending.length === 0;
@@ -491,6 +531,20 @@ function autoCheck() {
     refreshModels(getMissingStore, true);
 }
 
+const workflowLinker = createWorkflowLinker(categoryFor,
+    () => (app.rootGraph ?? app.graph)?.serialize?.(),
+    (added) => {
+        attachModelMetadata(app.rootGraph ?? app.graph, added, categoryFor);
+        const store = getMissingStore();
+        if (store?.missingModelCandidates) {
+            const enriched = enrichMissingCandidates(store.missingModelCandidates, added);
+            if (store.setMissingModels) store.setMissingModels(enriched);
+            else store.missingModelCandidates = enriched;
+        }
+        invalidateGuardCache();
+        render();
+    });
+
 app.registerExtension({
     name: "meshive.podDownload",
     settings: [
@@ -542,14 +596,20 @@ app.registerExtension({
     // that the frontend lists those models with a Download button — and ours.
     async beforeConfigureGraph(graphData) {
         try {
-            const added = await seedWorkflow(graphData, categoryFor);
+            folderOverrides.clear();
+            const added = await workflowLinker.beforeConfigure(graphData);
             if (added.length) debugLog("added download links for", added.map((m) => m.name));
         } catch (e) { console.warn("[meshive] workflow scan failed", e); }
+    },
+    afterConfigureGraph() {
+        // Supplement in the background: graph loading keeps its original 1.5 s scan budget.
+        workflowLinker.afterConfigure().catch((e) => console.warn("[meshive] late model scan failed", e));
     },
     async setup() {
         installHubBranding();
         for (const t of Object.values(EVT)) api.addEventListener(t, onServerEvent);
-        preloadManagerModels(); // in the background: ComfyUI-Manager's model list, when it is installed
+        preloadManagerModels().then(() => workflowLinker.managerLoaded())
+            .catch((e) => console.warn("[meshive] Manager model scan failed", e));
         window.addEventListener("focus", autoCheck);
         document.addEventListener("visibilitychange", autoCheck);
         syncGuard(categoryFor, installFromGuard);

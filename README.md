@@ -13,9 +13,9 @@ When a workflow needs a model you don't have, ComfyUI lists it under **Missing M
 - **Install all** shows the progress of the whole batch in the Missing Models panel, with a one-click retry for anything that failed or was cancelled.
 - A **Meshive** button in the top bar opens the downloads panel: every download in the pod with progress, speed, size, connections and queue position, and Pause / Resume / Cancel / Retry for each. Its settings are also under *Settings → Meshive*.
 - The model shows up in node dropdowns as soon as it finishes, and the Missing Models entry clears.
-- **Finds download links the workflow only mentions.** Many workflows put model links in a note instead of in the model metadata, so ComfyUI lists those models without a Download button. When a workflow loads, the extension looks for such links (in notes and any other text in the workflow, and in ComfyUI-Manager's model list when it is installed) and adds them for the models that are actually missing — ComfyUI then lists them with its Download button, and ours. When the right folder can only be guessed, a folder choice appears next to the button.
+- **Finds download links the workflow only mentions.** Many workflows put model links in a note instead of in the model metadata, so ComfyUI lists those models without a Download button. When a workflow loads, the extension looks for such links (in notes and any other text in the workflow, and in ComfyUI-Manager's model list when it is installed) and adds them for the models that are actually missing — ComfyUI then lists them with its Download button, and ours. If the Manager list arrives after the workflow loads, its links are added to the current graph automatically. When the right folder can only be guessed or is unknown, a folder choice appears next to the button; an unknown folder must be selected before installing.
 - Models in subfolders of a model folder (`SDXL/model.safetensors`) are installed into that subfolder.
-- Missing models that ComfyUI offers no Download button for (it does not for some file types, such as `.gguf`) still get *Install in Meshive Pod*.
+- Missing models that ComfyUI offers no Download button for (it does not for some file types, such as `.gguf`) get a browser **Download** action as well as *Install in Meshive Pod* when they have a supported URL. Browser downloads use the browser's own authentication; the page token is used only for pod installs.
 - Shows the size of models ComfyUI could not size by itself.
 - Checks the missing models again when you come back to the tab (*Auto missing-model checks*, on by default).
 - **Pod server settings** in the downloads panel, kept on the pod (ComfyUI's user folder):
@@ -25,7 +25,7 @@ When a workflow needs a model you don't have, ComfyUI lists it under **Missing M
 - Picks the right folder on Meshive storage (see below), so installed models load again after a page reload.
 - Continues where it stopped after a dropped connection, a pause, a failure or a ComfyUI restart, and waits for pod storage to grow instead of failing when the disk fills up.
 - Verifies the SHA-256 checksum when the workflow provides one. If the file is already in the folder it would install into but does not match the checksum, a new copy is downloaded, verified and swapped in (the old file is removed first only when the disk cannot hold both).
-- Otherwise never overwrites an existing file. Pods that share one network volume can install the same model at the same time safely.
+- Otherwise never overwrites an existing file. Pods that share one network volume can install the same model at the same time safely. Publishing uses hard links or an atomic rename that refuses an existing destination. If the filesystem supports neither, the completed partial file is kept and an error is shown instead of risking an overwrite.
 
 ## Installation
 
@@ -111,7 +111,7 @@ The download engine has tests that run against a local HTTP server, without Comf
 python -m unittest discover -s tests
 ```
 
-Run them with a Python that has `aiohttp` (ComfyUI's own environment does).
+Run them with a Python that has `aiohttp` (ComfyUI's own environment does). Node.js runs the frontend state and detection tests. The optional DOM button tests also need `jsdom`; set `MESHIVE_TEST_DOM_MODULE` to its module path if it is installed outside this repository. Without `jsdom`, only those DOM tests are skipped. No frontend build is needed.
 
 ## Acknowledgements
 

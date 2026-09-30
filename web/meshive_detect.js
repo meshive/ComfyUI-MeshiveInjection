@@ -289,6 +289,8 @@ function fromManager(name, nodeTypes, folders) {
 // ── Adding what we found to the workflow ────────────────────────────────────
 // "name|url" -> {directory, options}: models whose folder was only guessed, for the folder picker.
 export const folderChoices = new Map();
+// Includes models with a URL but no known folder, so the panel can offer a folder picker.
+export const discoveredModels = new Map();
 export const choiceKey = (name, url) => `${name}|${url}`;
 
 function categoryOf(nodeTypes, categoryFor) {
@@ -327,12 +329,13 @@ export async function checkModels(models, verifyHashes = false) {
 // `categoryFor(nodeType)` is the frontend's own folder for a node type: a match there is what lets
 // the frontend attach the URL to its row. Gives up (adding nothing) after `budgetMs`, since the
 // frontend waits for this before showing the workflow. Returns the entries added.
-export async function seedWorkflow(wf, categoryFor, budgetMs = 1500) {
+export async function seedWorkflow(wf, categoryFor, budgetMs = 1500, { reset = true, isCurrent = () => true } = {}) {
     if (!wf || typeof wf !== "object") return [];
     const deadline = Date.now() + budgetMs;
-    folderChoices.clear();
+    if (reset) { folderChoices.clear(); discoveredModels.clear(); }
+    const choices = new Map();
     const found = scanWorkflow(wf);
-    let todo = [...found.values()].filter((e) => e.used && !e.meta?.url);
+    let todo = [...found.values()].filter((e) => e.used && (!e.meta?.url || (!e.meta.directory && !categoryOf(e.nodeTypes, categoryFor))));
     if (!todo.length) return [];
     const TIMEOUT = Symbol("timeout");
     const withinBudget = (p) => Promise.race([p, new Promise((r) => setTimeout(() => r(TIMEOUT), Math.max(0, deadline - Date.now())))]);
@@ -349,7 +352,7 @@ export async function seedWorkflow(wf, categoryFor, budgetMs = 1500) {
     if (missing) todo = todo.filter((e) => missing.has(slash(e.name)));
     const added = [];
     for (const e of todo) {
-        let url = e.urlRef?.url, hint = null;
+        let url = e.meta?.url || e.urlRef?.url, hint = e.meta?.directory ?? null;
         if (!url) {
             const m = fromManager(e.name, [...e.nodeTypes], folders);
             if (m) { url = m.url; hint = m.directory; }
@@ -359,13 +362,87 @@ export async function seedWorkflow(wf, categoryFor, budgetMs = 1500) {
         if (!directory) {
             const r = inferDirectory({ name: e.name, url, nodeTypes: [...e.nodeTypes], directory: hint }, folders);
             directory = r.directory;
-            if (directory && r.ambiguous && r.options.length > 1) folderChoices.set(choiceKey(e.name, url), { directory, options: r.options });
+            if (!directory || (r.ambiguous && r.options.length > 1)) {
+                choices.set(choiceKey(e.name, url), { directory, options: directory ? r.options : [...folders].sort() });
+            }
         }
-        if (!directory) continue;
         added.push({ name: e.name, url, directory, ...(e.meta?.hash ? { hash: e.meta.hash } : {}), ...(e.meta?.hash_type ? { hash_type: e.meta.hash_type } : {}) });
     }
-    if (added.length) wf.models = [...(Array.isArray(wf.models) ? wf.models : []), ...added];
+    // A delayed check must not change the picker or workflow after the user switches graphs.
+    if (!isCurrent()) return [];
+    for (const [key, choice] of choices) folderChoices.set(key, choice);
+    for (const model of added) discoveredModels.set(choiceKey(model.name, model.url), model);
+    if (added.length) {
+        const existing = Array.isArray(wf.models) ? wf.models : [];
+        wf.models = [...existing, ...added.filter((m) => !existing.some((e) => e.name === m.name && e.url === m.url))];
+    }
     return added;
+}
+
+// Manager may finish before, during or after graph configuration. Supplement the current graph
+// once it is configured; never reload it, and discard answers for a graph that was replaced.
+export function createWorkflowLinker(categoryFor, snapshot, apply) {
+    let generation = 0, configured = false, managerReady = false, supplement = null;
+    const finish = async () => {
+        if (!configured || !managerReady) return;
+        const mine = generation;
+        if (supplement?.generation === mine) return supplement.promise;
+        const isCurrent = () => mine === generation && configured;
+        const promise = (async () => {
+            const wf = snapshot();
+            const added = await seedWorkflow(wf, categoryFor, 1500, { reset: false, isCurrent });
+            if (added.length && isCurrent()) apply(added);
+            return added;
+        })();
+        supplement = { generation: mine, promise };
+        return promise;
+    };
+    return {
+        async beforeConfigure(wf) {
+            const mine = ++generation;
+            configured = false;
+            return seedWorkflow(wf, categoryFor, 1500, { isCurrent: () => mine === generation });
+        },
+        afterConfigure() { configured = true; return finish(); },
+        managerLoaded() { managerReady = true; return finish(); },
+    };
+}
+
+// Update only missing candidates that lack usable metadata; keep the frontend's node/widget IDs.
+export function enrichMissingCandidates(list, models) {
+    return list.map((c) => {
+        if (!c.isMissing || (c.url && c.directory)) return c;
+        const m = models.find((m) => m.name === c.name && (!c.url || c.url === m.url)
+            && (!c.directory || !m.directory || c.directory === m.directory));
+        return m ? { ...c, url: c.url || m.url, directory: c.directory || m.directory,
+            hash: c.hash || m.hash, hash_type: c.hash_type || m.hash_type } : c;
+    });
+}
+
+// Persist discovered metadata on the live nodes, so a later native refresh or save keeps the URL.
+export function attachModelMetadata(graph, models, categoryFor) {
+    const seen = new Set();
+    const visit = (g) => {
+        if (!g || seen.has(g)) return;
+        seen.add(g);
+        for (const node of g._nodes ?? g.nodes ?? []) {
+            if (INACTIVE_MODES.has(node.mode)) continue;
+            if (node.subgraph) visit(node.subgraph);
+            const names = new Set((node.widgets ?? []).filter((w) => w.type === "combo").map((w) => w.value));
+            const directory = categoryFor?.(node.type);
+            for (const m of models) {
+                if (!names.has(m.name) || (directory && m.directory && directory !== m.directory)) continue;
+                node.properties ??= {};
+                const embedded = node.properties.models ??= [];
+                const metadata = { name: m.name, url: m.url, directory: m.directory,
+                    ...(m.hash ? { hash: m.hash } : {}), ...(m.hash_type ? { hash_type: m.hash_type } : {}) };
+                const existing = embedded.find((e) => e.name === m.name && (!e.url || e.url === m.url));
+                if (existing) Object.assign(existing, metadata);
+                else embedded.push(metadata);
+            }
+        }
+    };
+    visit(graph);
 }
 
 // The models the live graph selects in its model pickers — the combo widgets the frontend itself

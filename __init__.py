@@ -76,6 +76,7 @@ Meshive storage:
 
 import asyncio
 import concurrent.futures
+import ctypes
 import errno
 import hashlib
 import importlib.util
@@ -98,7 +99,7 @@ from aiohttp import web
 import folder_paths
 from server import PromptServer
 
-__version__ = "1.4.0"
+__version__ = "1.4.1"
 
 WEB_DIRECTORY = "./web"
 NODE_CLASS_MAPPINGS = {}
@@ -1014,21 +1015,51 @@ async def _hash_file(st: dict, path: str) -> str:
     return await asyncio.get_running_loop().run_in_executor(None, _sha256_file, path, st["abort"])
 
 
+def _rename_noreplace(source: str, target: str):
+    """Atomically rename without replacement when hard links are unavailable."""
+    if os.name == "nt":
+        os.rename(source, target)  # Windows rename refuses an existing target.
+        return
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin":
+        rename = getattr(libc, "renamex_np", None)
+        args = (os.fsencode(source), os.fsencode(target), 4)  # RENAME_EXCL
+        signature = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint)
+    elif sys.platform.startswith("linux"):
+        rename = getattr(libc, "renameat2", None)
+        args = (-100, os.fsencode(source), -100, os.fsencode(target), 1)  # AT_FDCWD, RENAME_NOREPLACE
+        signature = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
+    else:
+        rename = None
+    if rename is None:
+        raise OSError(errno.ENOTSUP, "atomic no-replace rename is unavailable", target)
+    rename.argtypes = signature
+    rename.restype = ctypes.c_int
+    if rename(*args) != 0:
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code), target)
+
+
 def _publish(part_path: str, dest_path: str) -> bool:
-    """Give the partial file its real name without overwriting anything. False if another pod got there first."""
+    """Publish a complete file atomically, without replacing another publisher's file."""
     try:
-        os.link(part_path, dest_path)  # atomic: fails with EEXIST if the target exists
+        try:
+            os.link(part_path, dest_path)
+        except OSError as e:
+            if e.errno not in (errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EXDEV, errno.EMLINK):
+                raise
+            try:
+                _rename_noreplace(part_path, dest_path)
+            except OSError as rename_error:
+                if rename_error.errno in (errno.ENOTSUP, errno.EOPNOTSUPP, errno.EINVAL, errno.ENOSYS):
+                    raise DownloadError("This filesystem cannot publish the model without risking an overwrite. "
+                                        "The completed partial file was kept; use a filesystem with hard links "
+                                        "or atomic no-replace rename support, then retry.") from rename_error
+                raise
+            return True
     except FileExistsError:
         os.remove(part_path)
         return False
-    except OSError as e:
-        if e.errno not in (errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EXDEV, errno.EMLINK):
-            raise
-        if os.path.exists(dest_path):  # filesystem without hard links: check, then rename
-            os.remove(part_path)
-            return False
-        os.replace(part_path, dest_path)
-        return True
     os.remove(part_path)
     return True
 
