@@ -1,6 +1,7 @@
 import {
     T, SETTING, VERSION, downloads, isActive, isFinished, isLocal, onChange, control, clearFinished,
     refreshAll, startDownload, fmtBytes, setting, setSetting, debugLog, hfState, forgetHfToken,
+    podSettings, setPodSetting, toast,
 } from "./meshive_core.js";
 import { resetTokenSection } from "./meshive_token.js";
 
@@ -187,6 +188,40 @@ function position() {
     panel.style.maxHeight = `${Math.max(240, window.innerHeight - top - margin)}px`;
 }
 
+// A checkbox for a setting of the pod's ComfyUI server (kept on the pod, for everyone using it).
+function podSettingRow(key, label, tip, state, note) {
+    const row = el("label", { display: "flex", alignItems: "flex-start", gap: "8px", cursor: "pointer" });
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = !!state[key];
+    cb.style.marginTop = "2px";
+    const text = el("div", { display: "flex", flexDirection: "column", gap: "2px" });
+    const noteEl = el("span", { fontSize: "0.6875rem", color: "var(--muted-foreground, #999)", lineHeight: "1.3" });
+    const show = (s) => { noteEl.textContent = note ? note(s) : ""; noteEl.style.display = noteEl.textContent ? "block" : "none"; };
+    cb.disabled = key === "cgroup_ram" && !!state.memory?.locked_by_env;
+    cb.addEventListener("change", async () => {
+        cb.disabled = true;
+        try { show(await setPodSetting(key, cb.checked)); }
+        catch (e) { cb.checked = !cb.checked; toast("warn", T.hubTitle, String(e.message || e)); }
+        finally { cb.disabled = key === "cgroup_ram" && !!state.memory?.locked_by_env; }
+    });
+    text.append(el("span", { fontSize: "0.75rem" }, label), el("span", { fontSize: "0.6875rem", color: "var(--muted-foreground, #999)", lineHeight: "1.3" }, tip), noteEl);
+    show(state);
+    row.append(cb, text);
+    return row;
+}
+
+function memoryNote(s) {
+    const m = s?.memory;
+    if (!m) return "";
+    const gb = (n) => (n ? fmtBytes(n) : "");
+    if (m.locked_by_env) return T.memLocked;
+    if (m.native) return T.memNative(gb(m.limit));
+    if (m.applied && s.cgroup_ram) return T.memApplied(gb(m.limit), gb(m.host_total));
+    if (m.limit && (!m.host_total || m.limit < m.host_total)) return s.cgroup_ram ? T.memNotApplied(gb(m.limit)) : T.memOff(gb(m.limit));
+    return T.memNone;
+}
+
 function settingRow(id, label, tip, fallback = false) {
     const row = el("label", { display: "flex", alignItems: "flex-start", gap: "8px", cursor: "pointer" });
     const cb = document.createElement("input");
@@ -271,6 +306,15 @@ export function openHub(info) {
     tokenEl = el("div", { display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px", fontSize: "0.6875rem", color: "var(--muted-foreground, #999)" });
     tokenEl.append(el("span"), button(T.hfForget, () => { forgetHfToken(); resetTokenSection(); }));
     settingsBody.append(tokenEl);
+    // The pod server's own settings, loaded when the panel opens.
+    podSettings().then((state) => {
+        if (!state || !panel) return;
+        settingsBody.append(
+            el("div", { fontSize: "0.6875rem", fontWeight: "600", marginTop: "4px" }, T.podSection),
+            podSettingRow("keepalive", T.keepalive, T.keepaliveTip, state),
+            podSettingRow("cgroup_ram", T.ramLimit, T.ramTip, state, memoryNote),
+        );
+    });
     settings.append(summary, settingsBody);
 
     const footer = el("div", { display: "flex", justifyContent: "flex-end", gap: "8px" });

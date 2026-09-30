@@ -4,7 +4,7 @@ import { api } from "../../scripts/api.js";
 // Shared by the Missing Models buttons (pod_download.js) and the downloads panel (meshive_hub.js):
 // server calls, the download states the server reports, texts and small helpers.
 
-export const VERSION = "1.3.0";
+export const VERSION = "1.4.0";
 
 export const EVT = {
     progress: "meshive_download_progress",
@@ -61,6 +61,15 @@ export const T = ko ? {
     guardUnresolved: (n) => `${n}개 모델은 어느 폴더에 있어야 하는지 알 수 없어 확인하지 못했습니다.`,
     guardReason: { missing: "없음", hash_mismatch: "체크섬 불일치", directory_unresolved: "폴더 알 수 없음", invalid_filename: "이름 오류" },
     guardInstall: (n) => `Install in Meshive Pod (${n})`, guardAnyway: "그래도 실행", folder: "폴더",
+    podSection: "Pod 서버 (이 Pod 의 ComfyUI 에 적용)",
+    keepalive: "연결 유지", keepaliveTip: "45초마다 웹소켓에 ping 을 보내, 브라우저와 Pod 사이 프록시가 한가한 연결을 끊지 않게 합니다.",
+    ramLimit: "Pod 메모리 한도 반영", ramTip: "컨테이너 메모리 한도를 모르는 구버전 ComfyUI 에 호스트 RAM 대신 Pod 의 한도를 알려 줍니다.",
+    memNative: (l) => l ? `ComfyUI 가 Pod 메모리 한도(${l})를 직접 반영하고 있어 바꾸지 않습니다.` : "이 ComfyUI 는 컨테이너 메모리 한도를 직접 반영합니다. 바꾸지 않습니다.",
+    memNotApplied: (l) => `Pod 메모리 한도 ${l} 가 있지만 아직 반영되지 않았습니다. ComfyUI 를 재시작하면 반영됩니다.`,
+    memApplied: (l, h) => `ComfyUI 에 Pod 메모리 한도 ${l} 를 알려 주고 있습니다 (호스트 ${h}).`,
+    memNone: "호스트 RAM 보다 작은 메모리 한도가 없어 바꿀 것이 없습니다.",
+    memOff: (l) => `Pod 메모리 한도 ${l} 가 있지만 꺼져 있습니다. 켜면 바로 적용됩니다.`,
+    memLocked: "Pod 환경변수 COMFYUI_MESHIVEINJECTION_NO_RAM_PATCH 로 꺼져 있습니다.",
     podWord: "Pod",
 } : {
     pod: "Install in Meshive Pod", podAll: "Install all in Meshive Pod", hub: "Meshive",
@@ -94,6 +103,15 @@ export const T = ko ? {
     guardUnresolved: (n) => n === 1 ? "1 model could not be checked: the folder it belongs in is unknown." : `${n} models could not be checked: the folders they belong in are unknown.`,
     guardReason: { missing: "missing", hash_mismatch: "checksum mismatch", directory_unresolved: "unknown folder", invalid_filename: "bad name" },
     guardInstall: (n) => `Install in Meshive Pod (${n})`, guardAnyway: "Queue anyway", folder: "Folder",
+    podSection: "Pod server (applies to this pod's ComfyUI)",
+    keepalive: "Connection keepalive", keepaliveTip: "Ping the websocket every 45 s, so a proxy between the browser and the pod does not close an idle connection.",
+    ramLimit: "Pod memory limit for ComfyUI", ramTip: "Tell a ComfyUI too old to know about container memory limits the pod's limit instead of the host's RAM.",
+    memNative: (l) => l ? `ComfyUI accounts for the pod's memory limit (${l}) itself; nothing is changed.` : "This ComfyUI accounts for container memory limits itself; nothing is changed.",
+    memNotApplied: (l) => `The pod has a memory limit of ${l}, not reported to ComfyUI yet. Restarting ComfyUI applies it.`,
+    memApplied: (l, h) => `Reporting the pod's memory limit of ${l} to ComfyUI (host ${h}).`,
+    memNone: "No memory limit below the host's RAM: nothing to change.",
+    memOff: (l) => `The pod has a memory limit of ${l}, but this is off. Turning it on applies it at once.`,
+    memLocked: "Turned off by COMFYUI_MESHIVEINJECTION_NO_RAM_PATCH in the pod environment.",
     podWord: "Pod",
 };
 
@@ -232,6 +250,20 @@ export async function sizesOf(urls) {
         const r = await post("/meshive/models/size", { urls, token });
         return r.ok ? r.body : {};
     } catch { return {}; }
+}
+
+// Settings that act on the ComfyUI server itself: {keepalive, cgroup_ram, memory}.
+export async function podSettings() {
+    try {
+        const res = await api.fetchApi("/meshive/settings");
+        return res.ok ? await res.json() : null;
+    } catch { return null; }
+}
+
+export async function setPodSetting(key, value) {
+    const r = await post("/meshive/settings", { [key]: value });
+    if (!r.ok) throw new Error(r.body.error || `HTTP ${r.status}`);
+    return r.body;
 }
 
 // ── Server calls ────────────────────────────────────────────────────────────

@@ -15,6 +15,8 @@ Routes (ComfyUI also registers each one under the `/api` prefix):
     GET  /meshive/download/status
     GET  /meshive/download/targets  read-only: where each model folder would download to
     GET  /meshive/info              {version, host, boot}
+    GET  /meshive/settings          the pod-side settings, and what the memory limit looks like
+    POST /meshive/settings          {keepalive?, cgroup_ram?}
     GET  /meshive/models/folders    {model type: [folders]}
     POST /meshive/models/check      {models: [{filename, directory?, hash?}], verify_hashes?}: which are missing
     POST /meshive/models/verify     {directory, filename, hash?}: is this one there (and intact)
@@ -76,6 +78,7 @@ import asyncio
 import concurrent.futures
 import errno
 import hashlib
+import importlib.util
 import ipaddress
 import json
 import logging
@@ -83,6 +86,7 @@ import os
 import re
 import shutil
 import socket
+import sys
 import threading
 import time
 import uuid
@@ -94,7 +98,7 @@ from aiohttp import web
 import folder_paths
 from server import PromptServer
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 WEB_DIRECTORY = "./web"
 NODE_CLASS_MAPPINGS = {}
@@ -620,7 +624,7 @@ def _state_path(st: dict) -> str:
 
 
 def _remove_partial(st: dict):
-    for path in (st["part_path"], _state_path(st), _state_path(st) + ".tmp"):
+    for path in (st["part_path"], _state_path(st), f"{_state_path(st)}.{_HOST_TAG}.{os.getpid()}.tmp"):
         try:
             os.remove(path)
         except FileNotFoundError:
@@ -664,7 +668,7 @@ def _load_progress(st: dict, total: int, etag: str) -> list[dict] | None:
 
 
 def _write_json_atomic(path: str, data: dict):
-    tmp = path + ".tmp"
+    tmp = f"{path}.{_HOST_TAG}.{os.getpid()}.tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f)
     os.replace(tmp, path)
@@ -1478,6 +1482,227 @@ async def download_targets(request):
     return web.json_response({"managed_roots": roots, "host": _HOST_TAG, "targets": out})
 
 
+# ---------------------------------------------------------------------------- #
+#                                   Pod helpers                                #
+# ---------------------------------------------------------------------------- #
+# Two settings that act on the ComfyUI server itself, kept in ComfyUI's user folder (on the pod's
+# volume in a Meshive pod, so they survive a restart):
+#   keepalive   a ping on every open websocket every WS_KEEPALIVE_SECONDS, so a proxy between the
+#               browser and the pod does not close an idle connection (on by default)
+#   cgroup_ram  on a ComfyUI too old to know about container memory limits, report the pod's limit
+#               instead of the host's RAM, so ComfyUI does not plan for memory the pod cannot use
+#               (on by default; COMFYUI_MESHIVEINJECTION_NO_RAM_PATCH=1 turns it off for good)
+# The websocket keepalive and the cgroup-aware memory report follow ComfyUI-RunpodDirect.
+
+WS_KEEPALIVE_SECONDS = 45
+SETTINGS_FILE = "meshive_injection.json"
+_RAM_PATCH_ENV = "COMFYUI_MESHIVEINJECTION_NO_RAM_PATCH"
+_settings = {"keepalive": True, "cgroup_ram": True}
+_ram_patch = {"applied": False, "original": None}
+_CGROUP_V2 = "/sys/fs/cgroup"
+_CGROUP_V1 = "/sys/fs/cgroup/memory"
+
+
+def _settings_path() -> str:
+    return os.path.join(folder_paths.get_user_directory(), SETTINGS_FILE)
+
+
+def _load_settings():
+    try:
+        with open(_settings_path(), encoding="utf-8") as f:
+            data = json.load(f)
+        for key in _settings:
+            if isinstance(data.get(key), bool):
+                _settings[key] = data[key]
+    except (OSError, ValueError, AttributeError):
+        pass  # no file yet (or unreadable): the defaults
+
+
+def _save_settings():
+    path = _settings_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    _write_json_atomic(path, _settings)
+
+
+def _env_off(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _comfy_knows_cgroups() -> bool:
+    """ComfyUI v0.37 and later read the container's memory limit themselves (comfy.system_memory)."""
+    try:
+        return importlib.util.find_spec("comfy.system_memory") is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def _read_int_file(path: str) -> int | None:
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = f.read().strip()
+        return None if raw in ("", "max") else int(raw)
+    except (OSError, ValueError):
+        return None
+
+
+def _cgroup_memory(v2: str = None, v1: str = None) -> tuple[int | None, int]:
+    """(limit, working set) of this container's memory cgroup; limit None when there is none.
+    The working set leaves out inactive file cache, which the kernel gives back under pressure —
+    after downloading models most of the "used" memory is that cache."""
+    v2, v1 = v2 or _CGROUP_V2, v1 or _CGROUP_V1
+    limit, usage = _read_int_file(os.path.join(v2, "memory.max")), _read_int_file(os.path.join(v2, "memory.current"))
+    root, key = v2, "inactive_file"
+    if limit is None and usage is None:
+        limit, usage = _read_int_file(os.path.join(v1, "memory.limit_in_bytes")), _read_int_file(os.path.join(v1, "memory.usage_in_bytes"))
+        root, key = v1, "total_inactive_file"
+    if limit is not None and limit >= 1 << 60:
+        limit = None  # v1's way of saying "unlimited"
+    inactive = 0
+    try:
+        with open(os.path.join(root, "memory.stat"), encoding="utf-8") as f:
+            for line in f:
+                name, _, value = line.partition(" ")
+                if name == key:
+                    inactive = int(value)
+                    break
+    except (OSError, ValueError):
+        pass
+    return limit, max(0, (usage or 0) - inactive)
+
+
+def _cgroup_aware(original, read=_cgroup_memory):
+    """psutil.virtual_memory, but no bigger than the container's memory cgroup allows."""
+    def virtual_memory():
+        vm = original()
+        if not _settings["cgroup_ram"]:
+            return vm
+        limit, working = read()
+        if not limit or limit >= vm.total:
+            return vm
+        available = max(0, min(vm.available, limit - working))
+        try:
+            return vm._replace(total=limit, available=available, used=min(vm.used, working), free=min(vm.free, available),
+                               percent=round(100.0 * (limit - available) / limit, 1))
+        except (AttributeError, TypeError, ValueError):
+            return vm
+    return virtual_memory
+
+
+def _memory_state() -> dict:
+    limit, working = _cgroup_memory() if sys.platform.startswith("linux") else (None, 0)
+    try:
+        import psutil
+        host = (_ram_patch["original"] or psutil.virtual_memory)().total
+    except Exception:  # noqa: BLE001 — informational only
+        host = None
+    return {"native": _comfy_knows_cgroups(), "applied": _ram_patch["applied"], "limit": limit, "host_total": host,
+            "working_set": working if limit else None, "locked_by_env": _env_off(_RAM_PATCH_ENV)}
+
+
+def _resize_comfy_ram(limit: int):
+    """ComfyUI works out a few figures from the RAM size once, at import — before this extension
+    loads. Bring them down to the pod's limit too (they only ever shrink), or it would, say, keep
+    10 GiB free in a 24 GiB pod on a big host. Its worker reads them later, so this is in time."""
+    try:
+        import comfy.model_management as mm
+        mm.total_ram = min(mm.total_ram, limit / (1024 * 1024))
+        pinned = getattr(mm, "MAX_PINNED_MEMORY", -1)
+        if pinned > 0:
+            swap = mm.get_disk_swap_total() if hasattr(mm, "get_disk_swap_total") else 0
+            mm.MAX_PINNED_MEMORY = min(pinned, max(limit * 0.40, min(limit * 0.90, limit - 4 * 1024**3, limit + swap - 16 * 1024**3)))
+    except Exception as e:  # noqa: BLE001 — the per-call figures are capped either way
+        log.info("could not resize ComfyUI's RAM figures: %s", e)
+
+
+def _apply_ram_patch():
+    """Only where it helps: Linux, a limit below the host's RAM, and a ComfyUI that does not handle it."""
+    if _ram_patch["applied"] or _env_off(_RAM_PATCH_ENV) or not sys.platform.startswith("linux") or _comfy_knows_cgroups():
+        return
+    try:
+        import psutil
+        limit, _ = _cgroup_memory()
+        if not limit or limit >= psutil.virtual_memory().total:
+            return
+        _ram_patch["original"] = psutil.virtual_memory
+        psutil.virtual_memory = _cgroup_aware(psutil.virtual_memory)
+        _ram_patch["applied"] = True
+        _resize_comfy_ram(limit)
+        log.info("reporting the pod's memory limit to ComfyUI: %.1f GiB", limit / 1024**3)
+    except Exception as e:  # noqa: BLE001 — ComfyUI keeps its own view
+        log.warning("could not apply the pod memory limit: %s", e)
+
+
+async def _ping_sockets():
+    for ws in list(getattr(PromptServer.instance, "sockets", {}).values()):
+        try:
+            if not ws.closed:
+                await asyncio.wait_for(ws.ping(), 5)
+        except Exception:  # noqa: BLE001 — a socket going away is ComfyUI's to clean up
+            pass
+
+
+async def _keepalive_loop():
+    while True:
+        await asyncio.sleep(WS_KEEPALIVE_SECONDS)
+        if _settings["keepalive"]:
+            await _ping_sockets()
+
+
+_background: set = set()  # kept here so the tasks are not garbage-collected
+
+
+async def _start_background(app=None):
+    task = asyncio.ensure_future(_keepalive_loop())
+    _background.add(task)
+    task.add_done_callback(_background.discard)
+
+
+def _schedule_background():
+    try:
+        PromptServer.instance.app.on_startup.append(_start_background)
+    except (RuntimeError, AttributeError):
+        # The server is already running (the extension was loaded late): start it on its loop.
+        loop = getattr(PromptServer.instance, "loop", None)
+        if loop is not None:
+            loop.call_soon_threadsafe(lambda: asyncio.ensure_future(_start_background()))
+
+
+def _pod_state() -> dict:
+    state = {**_settings, "keepalive_running": bool(_background), "memory": _memory_state()}
+    if state["memory"]["locked_by_env"]:
+        state["cgroup_ram"] = False
+    return state
+
+
+@PromptServer.instance.routes.get("/meshive/settings")
+async def get_settings(request):
+    return web.json_response(_pod_state())
+
+
+@PromptServer.instance.routes.post("/meshive/settings")
+async def set_settings(request):
+    try:
+        body = await request.json()
+    except Exception:
+        return _bad("invalid request body")
+    if not isinstance(body, dict):
+        return _bad("invalid request body")
+    changes = {k: body[k] for k in _settings if isinstance(body.get(k), bool)}
+    if changes.get("cgroup_ram") and _env_off(_RAM_PATCH_ENV):
+        return _bad(f"turned off by {_RAM_PATCH_ENV} in the pod environment", 409)
+    previous = dict(_settings)
+    _settings.update(changes)
+    try:
+        _save_settings()
+    except OSError as e:
+        _settings.update(previous)
+        return _bad(f"could not save the settings: {e.strerror or e}", 500)
+    if _settings["cgroup_ram"]:
+        _apply_ram_patch()
+    return web.json_response(_pod_state())
+
+
+
 @PromptServer.instance.routes.get("/meshive/hf/status")
 async def hf_status(request):
     return web.json_response({"env_token": bool(_env_hf_token())})
@@ -1569,3 +1794,13 @@ async def serve_script(request):
 
 if re.fullmatch(r"[A-Za-z0-9_.-]+", _EXT_NAME):
     PromptServer.instance.routes.get(f"/extensions/{_EXT_NAME}/{{name:[A-Za-z0-9_.-]+\\.js}}")(serve_script)
+
+
+# Start-up, once every route is registered: the pod-side settings, the memory limit report, the keepalive.
+try:
+    _load_settings()
+    if _settings["cgroup_ram"]:
+        _apply_ram_patch()
+    _schedule_background()
+except Exception as _e:  # noqa: BLE001 — downloads work without these
+    log.warning("pod helpers not started: %s", _e)

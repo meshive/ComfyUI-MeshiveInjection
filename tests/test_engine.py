@@ -49,6 +49,8 @@ def _get_full_path(d, name):
 
 fp.get_folder_paths = _get_folder_paths
 fp.get_full_path = _get_full_path
+USER_DIR = os.path.join(TMP, "user")
+fp.get_user_directory = lambda: USER_DIR
 sys.modules["folder_paths"] = fp
 
 
@@ -843,6 +845,99 @@ class ModelCheckTest(ServerCase):
         self.assertEqual(sizes[self.url()], len(self.fs.data))
         self.assertIsNone(sizes["https://evil.example/x.safetensors"])  # not an allowed host
         self.assertEqual(body_of(await m.model_folders(None)), {"checkpoints": [self.dir]})
+
+
+class PodHelpersTest(unittest.IsolatedAsyncioTestCase):
+    """Websocket keepalive, the memory limit report and the pod-side settings."""
+
+    def setUp(self):
+        self.saved = dict(m._settings)
+        shutil.rmtree(USER_DIR, ignore_errors=True)
+
+    def tearDown(self):
+        m._settings.update(self.saved)
+        os.environ.pop(m._RAM_PATCH_ENV, None)
+
+    async def test_settings_are_saved_and_read_back(self):
+        r = await m.set_settings(Request({"keepalive": False, "cgroup_ram": "yes", "other": True}))
+        self.assertEqual(body_of(r)["keepalive"], False)
+        with open(os.path.join(USER_DIR, m.SETTINGS_FILE)) as f:
+            self.assertEqual(json.load(f), {"keepalive": False, "cgroup_ram": True})
+        m._settings.update(keepalive=True)
+        m._load_settings()
+        self.assertFalse(m._settings["keepalive"])
+        self.assertIn("memory", body_of(await m.get_settings(None)))
+
+    async def test_the_environment_can_lock_the_memory_report_off(self):
+        os.environ[m._RAM_PATCH_ENV] = "1"
+        r = await m.set_settings(Request({"cgroup_ram": True}))
+        self.assertEqual(r.status, 409)
+        state = body_of(await m.get_settings(None))
+        self.assertTrue(state["memory"]["locked_by_env"])
+        self.assertFalse(state["cgroup_ram"])  # shown as off, as it is
+
+    async def test_settings_body_must_be_an_object(self):
+        for body in ([1], "x", 5, None):
+            self.assertEqual((await m.set_settings(Request(body))).status, 400)
+
+    def test_old_comfyui_ram_figures_follow_the_limit(self):
+        mm = types.ModuleType("comfy.model_management")
+        mm.total_ram, mm.MAX_PINNED_MEMORY = 256 * 1024.0, 200 * 1024**3
+        mm.get_disk_swap_total = lambda: 0
+        pkg = types.ModuleType("comfy")
+        pkg.model_management = mm
+        sys.modules["comfy"], sys.modules["comfy.model_management"] = pkg, mm
+        try:
+            m._resize_comfy_ram(24 * 1024**3)
+        finally:
+            del sys.modules["comfy"], sys.modules["comfy.model_management"]
+        self.assertEqual(mm.total_ram, 24 * 1024.0)
+        # ComfyUI's own formula on 24 GiB without swap: max(40 %, min(90 %, 20 GiB, 8 GiB)) = 9.6 GiB
+        self.assertAlmostEqual(mm.MAX_PINNED_MEMORY, 24 * 1024**3 * 0.40)
+
+    def cgroup(self, files):
+        root = tempfile.mkdtemp(dir=TMP)
+        for name, value in files.items():
+            with open(os.path.join(root, name), "w") as f:
+                f.write(value)
+        return root
+
+    def test_cgroup_limit_and_working_set(self):
+        v2 = self.cgroup({"memory.max": "8589934592\n", "memory.current": "6442450944", "memory.stat": "anon 1\ninactive_file 4294967296\n"})
+        self.assertEqual(m._cgroup_memory(v2, "/nonexistent"), (8 * 1024**3, 2 * 1024**3))
+        unlimited = self.cgroup({"memory.max": "max", "memory.current": "100"})
+        self.assertEqual(m._cgroup_memory(unlimited, "/nonexistent")[0], None)
+        v1 = self.cgroup({"memory.limit_in_bytes": str(1 << 62), "memory.usage_in_bytes": "5", "memory.stat": "total_inactive_file 2\n"})
+        self.assertEqual(m._cgroup_memory("/nonexistent", v1), (None, 3))
+
+    def test_memory_report_is_capped_at_the_limit(self):
+        Svmem = __import__("collections").namedtuple("svmem", "total available percent used free")
+        host = Svmem(total=64 * 1024**3, available=60 * 1024**3, percent=6.0, used=4 * 1024**3, free=60 * 1024**3)
+        patched = m._cgroup_aware(lambda: host, read=lambda: (16 * 1024**3, 6 * 1024**3))
+        vm = patched()
+        self.assertEqual((vm.total, vm.available, vm.used, vm.free), (16 * 1024**3, 10 * 1024**3, 4 * 1024**3, 10 * 1024**3))
+        m._settings["cgroup_ram"] = False
+        self.assertEqual(patched(), host)
+        m._settings["cgroup_ram"] = True
+        self.assertEqual(m._cgroup_aware(lambda: host, read=lambda: (None, 0))(), host)  # no limit
+
+    async def test_keepalive_pings_open_sockets_only(self):
+        class Ws:
+            def __init__(self, closed=False, fail=False):
+                self.closed, self.fail, self.pings = closed, fail, 0
+
+            async def ping(self):
+                if self.fail:
+                    raise ConnectionResetError()
+                self.pings += 1
+
+        socks = {"a": Ws(), "b": Ws(closed=True), "c": Ws(fail=True)}
+        srv.PromptServer.instance.sockets = socks
+        try:
+            await m._ping_sockets()
+        finally:
+            del srv.PromptServer.instance.sockets
+        self.assertEqual([s.pings for s in socks.values()], [1, 0, 0])
 
 
 class FrontendStateTest(unittest.TestCase):

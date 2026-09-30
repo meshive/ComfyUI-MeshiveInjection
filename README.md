@@ -18,6 +18,9 @@ When a workflow needs a model you don't have, ComfyUI lists it under **Missing M
 - Missing models that ComfyUI offers no Download button for (it does not for some file types, such as `.gguf`) still get *Install in Meshive Pod*.
 - Shows the size of models ComfyUI could not size by itself.
 - Checks the missing models again when you come back to the tab (*Auto missing-model checks*, on by default).
+- **Pod server settings** in the downloads panel, kept on the pod (ComfyUI's user folder):
+  - *Connection keepalive* (on): pings the browser's websocket every 45 s so a proxy between the browser and the pod does not close an idle connection.
+  - *Pod memory limit for ComfyUI* (on): ComfyUI v0.37 and later read the container's memory limit themselves, and are left alone. An older ComfyUI is told the pod's limit instead of the host's RAM (leaving reclaimable file cache out of "used"), so it does not plan for memory the pod cannot use. `COMFYUI_MESHIVEINJECTION_NO_RAM_PATCH=1` in the pod environment turns this off for good.
 - **Check models before running** (off by default): when you run a workflow, the pod first confirms that the models its model pickers select are there — optionally down to their checksums — and if one is missing, holds the run with a list of what is missing, an *Install in Meshive Pod* button and *Queue anyway*.
 - Picks the right folder on Meshive storage (see below), so installed models load again after a page reload.
 - Continues where it stopped after a dropped connection, a pause, a failure or a ComfyUI restart, and waits for pod storage to grow instead of failing when the disk fills up.
@@ -85,6 +88,8 @@ The extension adds these routes to the ComfyUI server (each also under `/api`):
 | `POST` | `/meshive/models/check` | `{models: [{filename, directory?, hash?}], verify_hashes?}` → `{missing, unresolved}` (at most 512) |
 | `POST` | `/meshive/models/verify` | `{directory, filename, hash?}` → `{exists, valid, reason}` |
 | `POST` | `/meshive/models/size` | `{urls, token?}` → `{url: size}` |
+| `GET` | `/meshive/settings` | `{keepalive, cgroup_ram, keepalive_running, memory}` |
+| `POST` | `/meshive/settings` | `{keepalive?, cgroup_ram?}` |
 | `GET` | `/meshive/hf/status` | `{env_token}` — is there a Hugging Face token in the pod environment |
 | `POST` | `/meshive/hf/verify` | `{token?, urls?}` → `{valid, name, source, access}` (without `token`, checks the pod's own) |
 
@@ -110,7 +115,7 @@ Run them with a Python that has `aiohttp` (ComfyUI's own environment does).
 
 ## Acknowledgements
 
-The parallel range downloads, the download queue, pause/resume, reinstalling a file that fails its checksum, the Hugging Face access messages, the downloads panel, the install-all progress, the Hugging Face token check, the workflow scan with its folder tables, and the check before running follow [ComfyUI-RunpodDirect](https://github.com/MadiatorLabs/ComfyUI-RunpodDirect) by Madiator2011 (GPL-3.0).
+The parallel range downloads, the download queue, pause/resume, reinstalling a file that fails its checksum, the Hugging Face access messages, the downloads panel, the install-all progress, the Hugging Face token check, the workflow scan with its folder tables, the check before running, the websocket keepalive and the memory limit report follow [ComfyUI-RunpodDirect](https://github.com/MadiatorLabs/ComfyUI-RunpodDirect) by Madiator2011 (GPL-3.0).
 
 ## License
 
