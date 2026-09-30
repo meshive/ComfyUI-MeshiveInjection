@@ -187,11 +187,11 @@ function position() {
     panel.style.maxHeight = `${Math.max(240, window.innerHeight - top - margin)}px`;
 }
 
-function settingRow(id, label, tip) {
+function settingRow(id, label, tip, fallback = false) {
     const row = el("label", { display: "flex", alignItems: "flex-start", gap: "8px", cursor: "pointer" });
     const cb = document.createElement("input");
     cb.type = "checkbox";
-    cb.checked = !!setting(id, false);
+    cb.checked = !!setting(id, fallback);
     cb.style.marginTop = "2px";
     cb.addEventListener("change", async () => {
         try { await setSetting(id, cb.checked); } catch (e) { cb.checked = !cb.checked; console.warn("[meshive] setting failed", e); }
@@ -262,7 +262,12 @@ export function openHub(info) {
     Object.assign(settings.style, { border: "1px solid var(--border-subtle, #333)", borderRadius: "0.5rem", background: "var(--secondary-background, #262626)", padding: "6px 8px" });
     const summary = el("summary", { cursor: "pointer", fontSize: "0.75rem", fontWeight: "600" }, T.settings);
     const settingsBody = el("div", { display: "flex", flexDirection: "column", gap: "6px", paddingTop: "6px" });
-    settingsBody.append(settingRow(SETTING.verbose, T.verbose, T.verboseTip));
+    settingsBody.append(
+        settingRow(SETTING.autoCheck, T.autoCheck, T.autoCheckTip, true),
+        settingRow(SETTING.guard, T.guard, T.guardTip),
+        settingRow(SETTING.strictHash, T.strictHash, T.strictHashTip),
+        settingRow(SETTING.verbose, T.verbose, T.verboseTip),
+    );
     tokenEl = el("div", { display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px", fontSize: "0.6875rem", color: "var(--muted-foreground, #999)" });
     tokenEl.append(el("span"), button(T.hfForget, () => { forgetHfToken(); resetTokenSection(); }));
     settingsBody.append(tokenEl);

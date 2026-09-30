@@ -15,6 +15,10 @@ Routes (ComfyUI also registers each one under the `/api` prefix):
     GET  /meshive/download/status
     GET  /meshive/download/targets  read-only: where each model folder would download to
     GET  /meshive/info              {version, host, boot}
+    GET  /meshive/models/folders    {model type: [folders]}
+    POST /meshive/models/check      {models: [{filename, directory?, hash?}], verify_hashes?}: which are missing
+    POST /meshive/models/verify     {directory, filename, hash?}: is this one there (and intact)
+    POST /meshive/models/size       {urls, token?}: file sizes, asked the way a download would ask
     GET  /meshive/hf/status         {env_token}: is there a Hugging Face token in the pod environment
     POST /meshive/hf/verify         {token?, urls?}: who the token belongs to, and which URLs it can fetch
 The extension's own scripts are served with no-cache headers (and X-Version), so an update is
@@ -90,7 +94,7 @@ from aiohttp import web
 import folder_paths
 from server import PromptServer
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 WEB_DIRECTORY = "./web"
 NODE_CLASS_MAPPINGS = {}
@@ -259,13 +263,27 @@ def _auth_headers(url: str, hf_token: str = "") -> dict:
 # ---------------------------------------------------------------------------- #
 
 def _sanitize_filename(name: str) -> str:
-    if not name or name != os.path.basename(name) or "\\" in name or name in (".", ".."):
+    """A model file name as ComfyUI lists it: a bare name, or one in subfolders of the model folder
+    ("SDXL/model.safetensors"). Returned with "/" separators."""
+    parts = str(name or "").replace("\\", "/").split("/")
+    if len(parts) > 8:
         raise ValueError("invalid filename")
-    if name.startswith(".") or "\x00" in name:
-        raise ValueError("invalid filename")
-    if not name.lower().endswith(ALLOWED_EXTENSIONS):
+    for seg in parts:
+        if not seg or seg in (".", "..") or seg.startswith(".") or "\x00" in seg or len(seg) > 180:
+            raise ValueError("invalid filename")
+    if not parts[-1].lower().endswith(ALLOWED_EXTENSIONS):
         raise ValueError(f"extension not allowed (allowed: {', '.join(ALLOWED_EXTENSIONS)})")
-    return name
+    return "/".join(parts)
+
+
+def _model_path(folder: str, name: str) -> str:
+    """Where `name` (from _sanitize_filename) goes in `folder`, refusing any way out of it — a
+    subfolder that is a link to somewhere else included."""
+    path = os.path.join(folder, *name.split("/"))
+    root = os.path.realpath(folder)
+    if not _within(os.path.realpath(os.path.dirname(path)), root):
+        raise ValueError("invalid filename: outside the model folder")
+    return path
 
 
 def _expected_sha256(value, hash_type) -> str:
@@ -301,7 +319,8 @@ def _blocked_roots() -> list[str]:
 
 
 def _within(path: str, root: str) -> bool:
-    return path == root or path.startswith(root.rstrip("/") + "/")
+    path, root = os.path.normcase(path), os.path.normcase(root)
+    return path == root or path.startswith(root.rstrip("/" + os.sep) + os.sep)
 
 
 def _on_mounted_storage(path: str) -> bool:
@@ -1160,7 +1179,7 @@ async def start_download(request):
         if existing and not expected:
             return web.json_response({"status": "exists", "filename": filename, "directory": directory})
         dest_dir, managed, temporary = _resolve_dest_dir(directory)
-        dest_path = os.path.join(dest_dir, filename)
+        dest_path = _model_path(dest_dir, filename)
         # Only the file this extension would install is replaced when it fails the checksum. One
         # elsewhere (a legacy folder, a shared or extra model path) is not ours to touch, and a new
         # copy here would not be the one ComfyUI loads — it counts as installed.
@@ -1171,6 +1190,13 @@ async def start_download(request):
         return _bad(str(e))
     except Exception:  # malformed JSON and the like
         return _bad("invalid request body")
+
+    if os.path.dirname(dest_path) != dest_dir:  # a subfolder of the model folder
+        try:
+            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+            _model_path(dest_dir, filename)  # again, now that the subfolder exists
+        except (OSError, ValueError) as e:
+            return _bad(f"cannot create the folder for {filename}: {getattr(e, 'strerror', None) or e}")
 
     # Same target already queued, running or paused: hand back that download instead of starting another.
     # A token given now (typed after "Install all", say) is for it too.
@@ -1270,6 +1296,157 @@ async def clear_downloads(request):
 @PromptServer.instance.routes.get("/meshive/download/status")
 async def download_status(request):
     return web.json_response([_public(s) for s in downloads.values()], headers={"X-Meshive-Boot": _BOOT})
+
+
+# ---------------------------------------------------------------------------- #
+#                         Checks for the workflow's models                     #
+# ---------------------------------------------------------------------------- #
+
+MAX_CHECK_MODELS = 512
+MAX_SIZE_URLS = 32
+# path -> ((inode, size, mtime_ns, ctime_ns), sha256): a file that did not change is not hashed again.
+_hash_cache: dict[str, tuple[tuple, str]] = {}
+# path -> the hashing in progress, shared by concurrent checks of the same file
+_hashing: dict[str, asyncio.Future] = {}
+
+
+def _model_folders() -> list[str]:
+    return [d for d in folder_paths.folder_names_and_paths if d not in ("custom_nodes", "configs")]
+
+
+async def _cached_sha256(path: str) -> str:
+    st = os.stat(path)
+    ident = (st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+    hit = _hash_cache.get(path)
+    if hit and hit[0] == ident:
+        return hit[1]
+    running = _hashing.get(path)
+    if running is None:
+        running = asyncio.ensure_future(asyncio.get_running_loop().run_in_executor(None, _sha256_file, path, threading.Event()))
+        _hashing[path] = running
+        running.add_done_callback(lambda _: _hashing.pop(path, None))
+    digest = await asyncio.shield(running)
+    _hash_cache[path] = (ident, digest)
+    return digest
+
+
+def _folder_arg(value) -> str | None:
+    return value if isinstance(value, str) and value in _model_folders() else None
+
+
+async def _check_model(raw: dict, verify_hashes: bool) -> tuple[str, dict]:
+    """("ok" | "missing" | "unresolved", report) for one model the workflow uses.
+
+    `directory` is where the node reads the model (known from the frontend or the workflow): only
+    that folder counts. `hint` is only a guess: the file counts wherever it is, and if it is nowhere,
+    the guess is where it would be installed."""
+    report = {k: raw[k] for k in ("filename", "name", "url", "hash", "hash_type") if k in raw}
+    try:
+        name = _sanitize_filename(str(raw.get("filename") or raw.get("name") or ""))
+    except ValueError as e:
+        return "unresolved", {**report, "reason": "invalid_filename", "error": str(e)}
+    report["filename"] = name
+    directory, hint = _folder_arg(raw.get("directory")), _folder_arg(raw.get("hint"))
+    if directory:
+        # Only where the node looks: a file of the same name in another model type does not count.
+        path = folder_paths.get_full_path(directory, name)
+        if not path:
+            elsewhere = [d for d in _model_folders() if d != directory and folder_paths.get_full_path(d, name)]
+            return "missing", {**report, "directory": directory, "reason": "missing",
+                               **({"found_in": elsewhere} if elsewhere else {})}
+    else:
+        order = ([hint] if hint else []) + [d for d in _model_folders() if d != hint]
+        found = next((d for d in order if folder_paths.get_full_path(d, name)), None)
+        if not found:
+            if hint:
+                return "missing", {**report, "directory": hint, "reason": "missing", "guessed": True}
+            return "unresolved", {**report, "reason": "directory_unresolved"}
+        directory, path = found, folder_paths.get_full_path(found, name)
+    expected = _expected_sha256(raw.get("hash"), raw.get("hash_type"))
+    if verify_hashes and expected and await _cached_sha256(path) != expected:
+        return "missing", {**report, "directory": directory, "reason": "hash_mismatch", "corrupted": True}
+    return "ok", {**report, "directory": directory}
+
+
+@PromptServer.instance.routes.get("/meshive/models/folders")
+async def model_folders(request):
+    return web.json_response({d: folder_paths.get_folder_paths(d) for d in sorted(_model_folders())})
+
+
+@PromptServer.instance.routes.post("/meshive/models/check")
+async def check_models(request):
+    """Which of the workflow's models are missing (or, with verify_hashes, fail their checksum)."""
+    try:
+        body = await request.json()
+        models = body.get("models")
+        verify_hashes = body.get("verify_hashes") is True
+    except Exception:
+        return _bad("invalid request body")
+    if not isinstance(models, list):
+        return _bad("models must be a list")
+    if len(models) > MAX_CHECK_MODELS:
+        return _bad(f"too many models (at most {MAX_CHECK_MODELS})")
+    missing, unresolved = [], []
+    for raw in models:
+        if not isinstance(raw, dict):
+            continue
+        verdict, report = await _check_model(raw, verify_hashes)
+        if verdict == "missing":
+            missing.append(report)
+        elif verdict == "unresolved":
+            unresolved.append(report)
+    return web.json_response({"missing": missing, "unresolved": unresolved, "checked": len(models),
+                              "verify_hashes": verify_hashes})
+
+
+@PromptServer.instance.routes.post("/meshive/models/verify")
+async def verify_model(request):
+    """Is this model there (in any folder ComfyUI searches for its type), and does it match the checksum?"""
+    try:
+        body = await request.json()
+        directory = str(body.get("directory") or "")
+        name = _sanitize_filename(str(body.get("filename") or ""))
+    except ValueError as e:
+        return _bad(str(e))
+    except Exception:
+        return _bad("invalid request body")
+    if not _folder_arg(directory):
+        return web.json_response({"exists": False, "valid": False, "reason": "invalid_directory"})
+    path = folder_paths.get_full_path(directory, name)
+    if not path:
+        return web.json_response({"exists": False, "valid": False, "reason": "missing"})
+    expected = _expected_sha256(body.get("hash"), body.get("hash_type"))
+    if not expected:
+        return web.json_response({"exists": True, "valid": True, "hash_verified": False, "reason": "no_hash"})
+    ok = await _cached_sha256(path) == expected
+    return web.json_response({"exists": True, "valid": ok, "hash_verified": ok,
+                              "reason": "ok" if ok else "hash_mismatch"})
+
+
+@PromptServer.instance.routes.post("/meshive/models/size")
+async def model_sizes(request):
+    """Sizes of model files, asked the way a download would ask (same hosts, resolver and redirects)."""
+    try:
+        body = await request.json()
+        urls = [u for u in (body.get("urls") or []) if isinstance(u, str)][:MAX_SIZE_URLS]
+        token = str(body.get("token") or "")
+    except Exception:
+        return _bad("invalid request body")
+    if token and not _HF_TOKEN_RE.fullmatch(token):
+        token = ""
+    timeout = aiohttp.ClientTimeout(total=20)
+    connector = aiohttp.TCPConnector(resolver=SafeResolver(), limit=8)
+    async with aiohttp.ClientSession(connector=connector, timeout=timeout, trust_env=False,
+                                     auto_decompress=False, headers={"Accept-Encoding": "identity"}) as session:
+        async def size_of(url):
+            try:
+                _validate_source_url(url)
+                total, _, _ = await _probe(session, url, token if _is_host(urlsplit(url).hostname, "huggingface.co") else "")
+                return total or None
+            except Exception:  # noqa: BLE001 — unknown size is fine here
+                return None
+        sizes = await asyncio.gather(*(size_of(u) for u in urls))
+    return web.json_response(dict(zip(urls, sizes)))
 
 
 @PromptServer.instance.routes.get("/meshive/download/targets")

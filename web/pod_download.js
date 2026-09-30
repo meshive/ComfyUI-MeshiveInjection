@@ -3,10 +3,12 @@ import { api } from "../../scripts/api.js";
 import {
     T, EVT, SETTING, keyOf, isActive, isRunning, isDone, current, latestFor, upsert, startDownload,
     control, refreshAll, refreshModels, checkVersion, toast, fmtBytes, debugLog, onChange, onReset, seqMark,
-    isHfUrl, hfEnvStatus,
+    isHfUrl, hfEnvStatus, setting, sizesOf,
 } from "./meshive_core.js";
-import { HUB_BUTTON_CLASS, toggleHub, rememberRequest, setInstaller } from "./meshive_hub.js";
+import { HUB_BUTTON_CLASS, toggleHub, openHub, rememberRequest, setInstaller } from "./meshive_hub.js";
 import { ensureTokenSection } from "./meshive_token.js";
+import { seedWorkflow, folderChoices, choiceKey, preloadManagerModels } from "./meshive_detect.js";
+import { syncGuard, invalidateGuardCache } from "./meshive_guard.js";
 
 // ComfyUI's "Download" button in the Missing Models panel is a browser download, so the model
 // lands on the user's computer. Next to it we add "Install in Meshive Pod", which asks the
@@ -25,26 +27,39 @@ const ALL_TESTID = "missing-model-download-all";
 const GATED_TESTID = "missing-model-gated-access";
 const MARK = "data-meshive-pod";
 
-function getMissingStore() {
+function getStore(id) {
     try {
         const vapp = document.getElementById("vue-app")?.__vue_app__;
         const provides = vapp?._context?.provides;
         if (!provides) return null;
         for (const s of Object.getOwnPropertySymbols(provides)) {
             const v = provides[s];
-            if (v && v._s instanceof Map) return v._s.get("missingModel") ?? null;
+            if (v && v._s instanceof Map) return v._s.get(id) ?? null;
         }
     } catch { /* the frontend internals changed — add no buttons and stay out of the way */ }
     return null;
 }
+
+const getMissingStore = () => getStore("missingModel");
+
+// The frontend's own model folder for a node type (what its Missing Models list uses).
+function categoryFor(nodeType) {
+    try { return getStore("modelToNode")?.getCategoryForNodeType?.(nodeType) ?? null; } catch { return null; }
+}
+
+// The folder the user picked for a model whose folder was only guessed ("name|url" -> folder).
+const folderOverrides = new Map();
 
 function candidates() {
     const store = getMissingStore();
     const list = store?.missingModelCandidates ?? [];
     const seen = new Set();
     const out = [];
-    for (const c of list) {
+    for (let c of list) {
         if (!c?.isMissing || !c.url || !c.directory || !c.name) continue;
+        // A picked folder applies everywhere: the button, its progress, "Install all".
+        const picked = folderOverrides.get(choiceKey(c.name, c.url));
+        if (picked) c = { ...c, directory: picked, guessedDirectory: c.directory };
         const k = keyOf(c.directory, c.name);
         if (seen.has(k)) continue;
         seen.add(k);
@@ -271,7 +286,8 @@ function ensureRowButtons() {
                 else install(cur);
             });
         }
-        const mine = line.firstElementChild;
+        ensureFolderPicker(line, c);
+        const mine = line.lastElementChild;
         mine.dataset.key = keyOf(c.directory, c.name);
         const st = current(c.directory, c.name);
         const label = labelFor(st);
@@ -280,6 +296,101 @@ function ensureRowButtons() {
         mine.disabled = isDone(st);
         mine.title = st?.error || (paused ? T.resume : isActive(st) ? T.cancel : `${c.directory}/${c.name}`);
     }
+    ensureRowsWithoutDownload(cands);
+}
+
+// The frontend offers its Download button only for some file types (not .gguf, say). Those rows still
+// get ours, on a line of their own under the row, like the others.
+function ensureRowsWithoutDownload(cands) {
+    const served = new Set([...document.querySelectorAll(`button[data-testid="${ROW_TESTID}"]`)].map(rowModelName));
+    const wanted = new Map();
+    for (const c of cands) {
+        if (served.has(c.name)) continue;
+        const nameBtn = [...document.querySelectorAll("button[title]")].find((b) => b.title === c.name && b.closest("div")?.querySelector('[data-testid="missing-model-locate"]'));
+        const row = nameBtn?.closest("div");
+        if (row) wanted.set(row, c);
+    }
+    for (const line of document.querySelectorAll(`div[${MARK}="row-alt"]`)) {
+        if (!wanted.has(line.previousElementSibling)) line.remove();
+    }
+    const template = document.querySelector(`button[data-testid="${ALL_TESTID}"]`) ?? document.querySelector(`button[data-testid="${ROW_TESTID}"]`);
+    for (const [row, c] of wanted) {
+        let line = row.nextElementSibling?.getAttribute?.(MARK) === "row-alt" ? row.nextElementSibling : null;
+        if (!line) {
+            line = document.createElement("div");
+            line.setAttribute(MARK, "row-alt");
+            Object.assign(line.style, { display: "flex", justifyContent: "flex-end", paddingBottom: "2px" });
+            const b = template ? makeButton(template, "row-button") : Object.assign(document.createElement("button"), { type: "button" });
+            if (!template) Object.assign(b.style, { padding: "4px 8px", borderRadius: "0.375rem", border: "1px solid var(--border-default, #444)", background: "var(--secondary-background, #333)", color: "var(--base-foreground, #eee)", fontSize: "0.75rem", cursor: "pointer" });
+            b.setAttribute(MARK, "row-button");
+            line.append(b);
+            row.after(line);
+            b.addEventListener("click", (e) => {
+                e.preventDefault(); e.stopPropagation();
+                const cur = candidates().find((x) => keyOf(x.directory, x.name) === b.dataset.key);
+                if (!cur) return;
+                const st = current(cur.directory, cur.name);
+                if (st?.status === "paused") control("resume", st);
+                else if (isActive(st)) control("cancel", st);
+                else install(cur);
+            });
+        }
+        ensureFolderPicker(line, c);
+        const mine = line.lastElementChild;
+        mine.dataset.key = keyOf(c.directory, c.name);
+        const st = current(c.directory, c.name);
+        const label = labelFor(st);
+        const paused = st?.status === "paused";
+        setText(mine, paused ? `${label} ▶` : isActive(st) ? `${label} ✕` : (label ?? T.pod));
+        mine.disabled = isDone(st);
+        mine.title = st?.error || (paused ? T.resume : isActive(st) ? T.cancel : `${c.directory}/${c.name}`);
+    }
+}
+
+// A model whose folder we could only guess gets a folder choice in front of its button.
+function ensureFolderPicker(line, c) {
+    const key = choiceKey(c.name, c.url);
+    const choice = folderChoices.get(key);
+    let select = line.querySelector("select");
+    if (!choice) { select?.remove(); return; }
+    if (!select) {
+        select = document.createElement("select");
+        select.title = T.folder;
+        Object.assign(select.style, { marginRight: "6px", maxWidth: "45%", fontSize: "0.75rem", borderRadius: "0.375rem",
+            background: "var(--base-background, #1e1e1e)", color: "var(--base-foreground, #eee)", border: "1px solid var(--border-default, #444)" });
+        for (const dir of choice.options) select.append(new Option(dir, dir));
+        select.addEventListener("click", (e) => e.stopPropagation());
+        select.addEventListener("change", () => { folderOverrides.set(key, select.value); render(); });
+        line.prepend(select);
+    }
+    const want = folderOverrides.get(key) ?? choice.directory;
+    if (select.value !== want) select.value = want;
+}
+
+// Sizes the frontend did not find (it looks up some hosts only, and not gated files): asked of the
+// pod once per URL and handed to the frontend's own store, so its list shows them. The store is
+// emptied on every workflow load, so what the pod told us is kept here and handed over again.
+const knownSizes = new Map(); // url -> size (null: the pod could not tell)
+const sizeAsking = new Set();
+function ensureSizes(cands) {
+    const store = getMissingStore();
+    if (!store?.setFileSize) return;
+    const ask = [];
+    for (const u of new Set(cands.map((c) => c.url))) {
+        if (!u || store.fileSizes?.[u] !== undefined) continue;
+        if (knownSizes.get(u) > 0) store.setFileSize(u, knownSizes.get(u));
+        else if (!knownSizes.has(u) && !sizeAsking.has(u)) ask.push(u);
+    }
+    const batch = ask.slice(0, 32);
+    if (!batch.length) return;
+    for (const u of batch) sizeAsking.add(u);
+    sizesOf(batch).then((sizes) => {
+        for (const u of batch) {
+            sizeAsking.delete(u);
+            knownSizes.set(u, sizes[u] ?? null);
+            if (sizes[u] > 0 && store.fileSizes?.[u] === undefined) store.setFileSize(u, sizes[u]);
+        }
+    });
 }
 
 // Missing Hugging Face models that need a token: gated by the frontend's mark, or refused for want of one.
@@ -332,6 +443,7 @@ function ensureAllButton() {
     ensureProgressArea(line);
     const area = line.nextElementSibling?.getAttribute?.(MARK) === "progress" ? line.nextElementSibling : line;
     ensureTokenSection(area, gatedCandidates(cands));
+    ensureSizes(cands);
 }
 
 // Not requestAnimationFrame: it does not run while the tab is hidden, so progress received in the
@@ -354,12 +466,30 @@ function onServerEvent(ev) {
     if (ev.type === EVT.error && d.error && d.error !== "cancelled") toast("error", d.filename, d.error);
     if (ev.type === EVT.complete) {
         if (d.temporary) toast("warn", d.filename, T.tempNote);
+        invalidateGuardCache();
         refreshModels(getMissingStore);
     }
     if (ev.type === EVT.complete || ev.type === EVT.error) settleBatch();
 }
 
 let serverInfo = null;
+
+// Models the check before a run found missing: install them all, and show the downloads panel.
+function installFromGuard(models) {
+    startBatch(models.map((m) => ({ name: m.filename, directory: m.directory, url: m.url, hash: m.hash ?? undefined, hash_type: m.hash_type ?? undefined })));
+    openHub(serverInfo);
+}
+
+// Coming back to the tab: models may have been added or removed meanwhile (another tab, a terminal).
+const AUTO_CHECK_MS = 30000;
+let lastAutoCheck = 0;
+function autoCheck() {
+    if (!setting(SETTING.autoCheck, true) || document.visibilityState !== "visible") return;
+    if (!(getMissingStore()?.missingModelCandidates?.length) || Date.now() - lastAutoCheck < AUTO_CHECK_MS) return;
+    lastAutoCheck = Date.now();
+    debugLog("auto check of missing models");
+    refreshModels(getMissingStore, true);
+}
 
 app.registerExtension({
     name: "meshive.podDownload",
@@ -372,6 +502,32 @@ app.registerExtension({
             type: "boolean",
             defaultValue: false,
         },
+        {
+            id: SETTING.autoCheck,
+            category: ["Meshive", "Downloads", "Auto missing-model checks"],
+            name: "Auto missing-model checks",
+            tooltip: "Check the missing models again when you come back to the tab (at most every 30 s).",
+            type: "boolean",
+            defaultValue: true,
+        },
+        {
+            id: SETTING.guard,
+            category: ["Meshive", "Downloads", "Check models before running"],
+            name: "Check models before running",
+            tooltip: "When you run a workflow, first check that its models are in the pod, and stop if they are not.",
+            type: "boolean",
+            defaultValue: false,
+            onChange: () => syncGuard(categoryFor, installFromGuard),
+        },
+        {
+            id: SETTING.strictHash,
+            category: ["Meshive", "Downloads", "Checksums before running"],
+            name: "Checksums before running",
+            tooltip: "The check before running also verifies the contents of models that have a checksum. Slow for large models.",
+            type: "boolean",
+            defaultValue: false,
+            onChange: () => invalidateGuardCache(),
+        },
     ],
     actionBarButtons: [
         {
@@ -382,8 +538,20 @@ app.registerExtension({
             onClick: () => toggleHub(serverInfo),
         },
     ],
+    // Before a workflow is configured: add the links it only mentions (notes, the Manager's list) so
+    // that the frontend lists those models with a Download button — and ours.
+    async beforeConfigureGraph(graphData) {
+        try {
+            const added = await seedWorkflow(graphData, categoryFor);
+            if (added.length) debugLog("added download links for", added.map((m) => m.name));
+        } catch (e) { console.warn("[meshive] workflow scan failed", e); }
+    },
     async setup() {
         for (const t of Object.values(EVT)) api.addEventListener(t, onServerEvent);
+        preloadManagerModels(); // in the background: ComfyUI-Manager's model list, when it is installed
+        window.addEventListener("focus", autoCheck);
+        document.addEventListener("visibilitychange", autoCheck);
+        syncGuard(categoryFor, installFromGuard);
         // After a lost connection (ComfyUI restarted, say) the events in between are gone: ask again.
         api.addEventListener("reconnected", () => refreshAll());
         onChange(render);

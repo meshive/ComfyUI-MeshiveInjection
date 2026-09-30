@@ -4,7 +4,7 @@ import { api } from "../../scripts/api.js";
 // Shared by the Missing Models buttons (pod_download.js) and the downloads panel (meshive_hub.js):
 // server calls, the download states the server reports, texts and small helpers.
 
-export const VERSION = "1.2.0";
+export const VERSION = "1.3.0";
 
 export const EVT = {
     progress: "meshive_download_progress",
@@ -16,6 +16,9 @@ export const EVT = {
 
 export const SETTING = {
     verbose: "Meshive.Download.VerboseLogs",
+    autoCheck: "Meshive.Download.AutoCheck",
+    guard: "Meshive.Download.PreQueueGuard",
+    strictHash: "Meshive.Download.StrictHashCheck",
 };
 
 const ko = (() => {
@@ -51,6 +54,13 @@ export const T = ko ? {
     hfAcceptTerms: "약관 동의", hfUnreachable: "확인 불가", hfNotFound: "없음", hfDenied: "접근 권한 없음",
     hfErr: { rejected: "Hugging Face 가 이 토큰을 받아들이지 않았습니다. 토큰이 맞는지, 읽기 권한이 있는지 확인하세요.", format: "hf_ 로 시작하는 Hugging Face 토큰을 넣으세요.", unreachable: "Pod 에서 Hugging Face 에 연결하지 못해 토큰을 확인하지 못했습니다." },
     hfSource: (src, name) => src === "page" ? `Hugging Face 토큰: 이 페이지 (${name})` : src === "env" ? "Hugging Face 토큰: Pod 환경변수 HF_TOKEN" : "Hugging Face 토큰: 없음",
+    autoCheck: "누락 모델 자동 재점검", autoCheckTip: "탭으로 돌아올 때 누락 모델 목록을 다시 확인합니다(30초에 한 번까지).",
+    guard: "실행 전 모델 점검", guardTip: "실행할 때 워크플로의 모델이 Pod 에 있는지 먼저 확인하고, 없으면 실행을 멈춥니다.",
+    strictHash: "실행 전 체크섬 검사", strictHashTip: "실행 전 점검에서 체크섬이 있는 모델은 파일 내용까지 확인합니다. 큰 모델은 느립니다.",
+    guardTitle: "누락된 모델이 있습니다", guardText: "이 워크플로에 필요한 모델 중 Pod 에 없거나 체크섬이 맞지 않는 것이 있어 실행을 멈췄습니다. 실패하거나 결과가 잘못 나오는 것을 막기 위해서입니다.",
+    guardUnresolved: (n) => `${n}개 모델은 어느 폴더에 있어야 하는지 알 수 없어 확인하지 못했습니다.`,
+    guardReason: { missing: "없음", hash_mismatch: "체크섬 불일치", directory_unresolved: "폴더 알 수 없음", invalid_filename: "이름 오류" },
+    guardInstall: (n) => `Install in Meshive Pod (${n})`, guardAnyway: "그래도 실행", folder: "폴더",
     podWord: "Pod",
 } : {
     pod: "Install in Meshive Pod", podAll: "Install all in Meshive Pod", hub: "Meshive",
@@ -77,6 +87,13 @@ export const T = ko ? {
     hfAcceptTerms: "Accept terms", hfUnreachable: "could not check", hfNotFound: "not found", hfDenied: "no access",
     hfErr: { rejected: "Hugging Face did not accept this token. Check that it is correct and has read access.", format: "Enter a Hugging Face token starting with hf_.", unreachable: "The pod could not reach Hugging Face to check the token." },
     hfSource: (src, name) => src === "page" ? `Hugging Face token: this page (${name})` : src === "env" ? "Hugging Face token: pod environment (HF_TOKEN)" : "Hugging Face token: none",
+    autoCheck: "Auto missing-model checks", autoCheckTip: "Check the missing models again when you come back to the tab (at most every 30 s).",
+    guard: "Check models before running", guardTip: "When you run a workflow, first check that its models are in the pod, and stop if they are not.",
+    strictHash: "Checksums before running", strictHashTip: "The check before running also verifies the contents of models that have a checksum. Slow for large models.",
+    guardTitle: "Missing models detected", guardText: "The run was stopped because some models this workflow needs are not in the pod or fail their checksum. This prevents a failed or broken run.",
+    guardUnresolved: (n) => n === 1 ? "1 model could not be checked: the folder it belongs in is unknown." : `${n} models could not be checked: the folders they belong in are unknown.`,
+    guardReason: { missing: "missing", hash_mismatch: "checksum mismatch", directory_unresolved: "unknown folder", invalid_filename: "bad name" },
+    guardInstall: (n) => `Install in Meshive Pod (${n})`, guardAnyway: "Queue anyway", folder: "Folder",
     podWord: "Pod",
 };
 
@@ -208,6 +225,15 @@ export async function hfVerify(token, urls) {
     return r.body;
 }
 
+// File sizes for these URLs (null when unknown), asked by the pod the way a download would ask.
+export async function sizesOf(urls) {
+    try {
+        const token = urls.some(isHfUrl) ? hf.token ?? undefined : undefined;
+        const r = await post("/meshive/models/size", { urls, token });
+        return r.ok ? r.body : {};
+    } catch { return {}; }
+}
+
 // ── Server calls ────────────────────────────────────────────────────────────
 async function post(path, body) {
     const res = await api.fetchApi(path, {
@@ -278,9 +304,17 @@ export async function refreshAll(restored = false) {
 }
 
 // Make a new file show up in model dropdowns and drop out of the Missing list right away.
-export async function refreshModels(getMissingStore) {
+// `quiet`: only look again at which models are missing (the model lists are reloaded once, without
+// the frontend's "updated" notices) — for checks the user did not ask for.
+export async function refreshModels(getMissingStore, quiet = false) {
+    const store = getMissingStore();
+    if (quiet) {
+        try { await store?.refreshMissingModels?.(); } catch (e) { console.warn("[meshive] refreshMissingModels failed", e); }
+        return;
+    }
     try { await app.refreshComboInNodes?.(); } catch (e) { console.warn("[meshive] refreshComboInNodes failed", e); }
-    try { await getMissingStore()?.refreshMissingModels?.(); } catch (e) { console.warn("[meshive] refreshMissingModels failed", e); }
+    // The definitions were just reloaded above: no need to reload them again.
+    try { await store?.refreshMissingModels?.({ reloadDefs: false }); } catch (e) { console.warn("[meshive] refreshMissingModels failed", e); }
     // Node error outlines only clear on the next canvas redraw.
     try { app.canvas?.setDirty?.(true, true); } catch { /* the next redraw will pick it up */ }
 }

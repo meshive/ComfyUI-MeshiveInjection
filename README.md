@@ -13,6 +13,12 @@ When a workflow needs a model you don't have, ComfyUI lists it under **Missing M
 - **Install all** shows the progress of the whole batch in the Missing Models panel, with a one-click retry for anything that failed or was cancelled.
 - A **Meshive** button in the top bar opens the downloads panel: every download in the pod with progress, speed, size, connections and queue position, and Pause / Resume / Cancel / Retry for each. Its settings are also under *Settings → Meshive*.
 - The model shows up in node dropdowns as soon as it finishes, and the Missing Models entry clears.
+- **Finds download links the workflow only mentions.** Many workflows put model links in a note instead of in the model metadata, so ComfyUI lists those models without a Download button. When a workflow loads, the extension looks for such links (in notes and any other text in the workflow, and in ComfyUI-Manager's model list when it is installed) and adds them for the models that are actually missing — ComfyUI then lists them with its Download button, and ours. When the right folder can only be guessed, a folder choice appears next to the button.
+- Models in subfolders of a model folder (`SDXL/model.safetensors`) are installed into that subfolder.
+- Missing models that ComfyUI offers no Download button for (it does not for some file types, such as `.gguf`) still get *Install in Meshive Pod*.
+- Shows the size of models ComfyUI could not size by itself.
+- Checks the missing models again when you come back to the tab (*Auto missing-model checks*, on by default).
+- **Check models before running** (off by default): when you run a workflow, the pod first confirms that the models its model pickers select are there — optionally down to their checksums — and if one is missing, holds the run with a list of what is missing, an *Install in Meshive Pod* button and *Queue anyway*.
 - Picks the right folder on Meshive storage (see below), so installed models load again after a page reload.
 - Continues where it stopped after a dropped connection, a pause, a failure or a ComfyUI restart, and waits for pod storage to grow instead of failing when the disk fills up.
 - Verifies the SHA-256 checksum when the workflow provides one. If the file is already in the folder it would install into but does not match the checksum, a new copy is downloaded, verified and swapped in (the old file is removed first only when the disk cannot hold both).
@@ -75,6 +81,10 @@ The extension adds these routes to the ComfyUI server (each also under `/api`):
 | `GET` | `/meshive/download/status` | all downloads since ComfyUI started |
 | `GET` | `/meshive/download/targets` | which folder each model type would be saved to, and why |
 | `GET` | `/meshive/info` | `{version, host, boot}` |
+| `GET` | `/meshive/models/folders` | model types and their folders |
+| `POST` | `/meshive/models/check` | `{models: [{filename, directory?, hash?}], verify_hashes?}` → `{missing, unresolved}` (at most 512) |
+| `POST` | `/meshive/models/verify` | `{directory, filename, hash?}` → `{exists, valid, reason}` |
+| `POST` | `/meshive/models/size` | `{urls, token?}` → `{url: size}` |
 | `GET` | `/meshive/hf/status` | `{env_token}` — is there a Hugging Face token in the pod environment |
 | `POST` | `/meshive/hf/verify` | `{token?, urls?}` → `{valid, name, source, access}` (without `token`, checks the pod's own) |
 
@@ -100,7 +110,7 @@ Run them with a Python that has `aiohttp` (ComfyUI's own environment does).
 
 ## Acknowledgements
 
-The parallel range downloads, the download queue, pause/resume, reinstalling a file that fails its checksum, the Hugging Face access messages, the downloads panel, the install-all progress and the Hugging Face token check follow [ComfyUI-RunpodDirect](https://github.com/MadiatorLabs/ComfyUI-RunpodDirect) by Madiator2011 (GPL-3.0).
+The parallel range downloads, the download queue, pause/resume, reinstalling a file that fails its checksum, the Hugging Face access messages, the downloads panel, the install-all progress, the Hugging Face token check, the workflow scan with its folder tables, and the check before running follow [ComfyUI-RunpodDirect](https://github.com/MadiatorLabs/ComfyUI-RunpodDirect) by Madiator2011 (GPL-3.0).
 
 ## License
 

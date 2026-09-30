@@ -740,12 +740,122 @@ class TokenTest(ServerCase):
             self.assertEqual((await m._hf_access(session, "http://huggingface.co/a", "hf_x"))["reason"], "unreachable")
 
 
+class ModelCheckTest(ServerCase):
+    """The checks behind the workflow scan and the check before a run."""
+
+    def put(self, name, data=b"x"):
+        path = os.path.join(self.dir, *name.split("/"))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(data)
+        return path
+
+    async def check(self, models, verify=False):
+        return body_of(await m.check_models(Request({"models": models, "verify_hashes": verify})))
+
+    def test_model_names_may_carry_subfolders_but_never_leave_the_folder(self):
+        self.assertEqual(m._sanitize_filename("SDXL\\model.safetensors"), "SDXL/model.safetensors")
+        for bad in ("../x.safetensors", "a/../x.safetensors", "/abs.safetensors", ".hidden/x.safetensors", "a//x.safetensors", "x.txt"):
+            with self.assertRaises(ValueError, msg=bad):
+                m._sanitize_filename(bad)
+        outside = tempfile.mkdtemp(dir=TMP)
+        os.symlink(outside, os.path.join(self.dir, "link"))
+        with self.assertRaises(ValueError):
+            m._model_path(self.dir, "link/x.safetensors")
+
+    async def test_install_into_a_subfolder(self):
+        st = await self.start("sub/model.safetensors", url=self.url())
+        await self.wait_event(m.EVT_COMPLETE, st["id"])
+        with open(os.path.join(self.dir, "sub", "model.safetensors"), "rb") as f:
+            self.assertEqual(f.read(), self.fs.data)
+
+    async def test_batch_check(self):
+        fp.folder_names_and_paths = {"checkpoints": ([self.dir], set()), "vae": ([tempfile.mkdtemp(dir=TMP)], set())}
+        self.put("here.safetensors", b"good")
+        self.put("sub/nested.safetensors")
+        good = hashlib.sha256(b"good").hexdigest()
+        r = await self.check([
+            {"filename": "here.safetensors", "directory": "checkpoints", "hash": good},
+            {"filename": "sub/nested.safetensors", "directory": "checkpoints"},
+            {"filename": "gone.safetensors", "directory": "checkpoints"},
+            {"filename": "here.safetensors", "directory": "vae"},          # only in another model type
+            {"filename": "nowhere.safetensors"},                             # no folder known
+            {"filename": "../evil.safetensors", "directory": "checkpoints"},
+        ])
+        self.assertEqual(sorted(x["filename"] for x in r["missing"]), ["gone.safetensors", "here.safetensors"])
+        self.assertEqual([x for x in r["missing"] if x["directory"] == "vae"][0]["found_in"], ["checkpoints"])
+        self.assertEqual(sorted(x["reason"] for x in r["unresolved"]), ["directory_unresolved", "invalid_filename"])
+        # With checksums: a file that does not match counts as missing.
+        r = await self.check([{"filename": "here.safetensors", "directory": "checkpoints", "hash": "0" * 64}], verify=True)
+        self.assertEqual(r["missing"][0]["reason"], "hash_mismatch")
+        r = await self.check([{"filename": "here.safetensors", "directory": "checkpoints", "hash": good}], verify=True)
+        self.assertEqual(r["missing"], [])
+
+    async def test_a_guessed_folder_is_only_a_hint(self):
+        fp.folder_names_and_paths = {"checkpoints": ([self.dir], set()), "vae": ([tempfile.mkdtemp(dir=TMP)], set()),
+                                     "configs": ([self.dir], set())}
+        self.put("ckpt.safetensors")
+        r = await self.check([
+            {"filename": "ckpt.safetensors", "hint": "vae"},           # guessed wrong, but it is there
+            {"filename": "new.safetensors", "hint": "vae"},            # nowhere: would go to the guess
+            {"filename": "odd.safetensors", "directory": ["vae"]},     # not a folder name: ignored, no error
+            {"filename": "ckpt.safetensors", "directory": "configs"},  # not a model folder
+        ])
+        self.assertEqual([(x["filename"], x["directory"], x.get("guessed")) for x in r["missing"]], [("new.safetensors", "vae", True)])
+        self.assertEqual([x["filename"] for x in r["unresolved"]], ["odd.safetensors"])
+
+    async def test_checksum_cache_notices_a_rewritten_file(self):
+        path = self.put("same.safetensors", b"aaaa")
+        st = os.stat(path)
+        good = hashlib.sha256(b"aaaa").hexdigest()
+        r = await self.check([{"filename": "same.safetensors", "directory": "checkpoints", "hash": good}], verify=True)
+        self.assertEqual(r["missing"], [])
+        with open(path, "wb") as f:
+            f.write(b"bbbb")  # same size...
+        os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))  # ...and the old modification time
+        r = await self.check([{"filename": "same.safetensors", "directory": "checkpoints", "hash": good}], verify=True)
+        self.assertEqual(r["missing"][0]["reason"], "hash_mismatch")
+
+    async def test_existing_subfolder_model_creates_no_folder(self):
+        self.put("there/model.safetensors")
+        st = await self.start("there/model.safetensors", url=self.url())
+        self.assertEqual(st["status"], "exists")
+        st = await self.start("nowhere/model.safetensors", url=self.url())
+        self.assertEqual(st["status"], "queued")
+        self.assertTrue(os.path.isdir(os.path.join(self.dir, "nowhere")))
+        self.put("afile.safetensors")
+        os.rename(os.path.join(self.dir, "afile.safetensors"), os.path.join(self.dir, "blocker"))
+        resp = await m.start_download(Request({"url": self.url(), "directory": "checkpoints", "filename": "blocker/x.safetensors"}))
+        self.assertEqual(resp.status, 400)
+        self.assertIn("cannot create the folder", body_of(resp)["error"])
+
+    async def test_single_verify(self):
+        self.put("one.safetensors", b"abc")
+        ok = body_of(await m.verify_model(Request({"directory": "checkpoints", "filename": "one.safetensors", "hash": hashlib.sha256(b"abc").hexdigest()})))
+        self.assertEqual((ok["exists"], ok["valid"], ok["reason"]), (True, True, "ok"))
+        bad = body_of(await m.verify_model(Request({"directory": "checkpoints", "filename": "one.safetensors", "hash": "1" * 64})))
+        self.assertEqual(bad["reason"], "hash_mismatch")
+        gone = body_of(await m.verify_model(Request({"directory": "checkpoints", "filename": "two.safetensors"})))
+        self.assertFalse(gone["exists"])
+
+    async def test_sizes_and_folders(self):
+        sizes = body_of(await m.model_sizes(Request({"urls": [self.url(), "https://evil.example/x.safetensors"]})))
+        self.assertEqual(sizes[self.url()], len(self.fs.data))
+        self.assertIsNone(sizes["https://evil.example/x.safetensors"])  # not an allowed host
+        self.assertEqual(body_of(await m.model_folders(None)), {"checkpoints": [self.dir]})
+
+
 class FrontendStateTest(unittest.TestCase):
     """web/meshive_core.js, through tests/test_core.mjs."""
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is not installed")
     def test_core_state(self):
         r = subprocess.run(["node", str(ROOT / "tests" / "test_core.mjs")], capture_output=True, text=True, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is not installed")
+    def test_workflow_scan(self):
+        r = subprocess.run(["node", str(ROOT / "tests" / "test_detect.mjs")], capture_output=True, text=True, timeout=120)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
 
