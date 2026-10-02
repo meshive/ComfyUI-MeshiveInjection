@@ -10,20 +10,48 @@ import { resetTokenSection } from "./meshive_token.js";
 
 export const HUB_BUTTON_CLASS = "meshive-hub-btn";
 export const HUB_ICON_CLASS = "meshive-brand-icon";
+const OPEN_CLASS = "meshive-hub-open";
 const LOGO_URL = new URL("./meshive-logo.svg", import.meta.url).href;
 const POLL_MS = 3000;
 const MAX_ROWS = 60;
 
+// Meshive's main button color (the web console's), and the logo's gradient for the top-bar button.
+export const BRAND = "#4169E1";
+const BRAND_HOVER = "#2B4FC4";
+const BRAND_GRADIENT = "linear-gradient(90deg, #4169E1, #18CCC5 70%, #00FFA3)";
+// Marks the install buttons that take the brand color.
+export const BRAND_ATTR = "data-meshive-brand";
+
+// Unlayered rules: they beat the frontend's utility classes, which live in a CSS layer.
 export function installHubBranding() {
     if (document.getElementById("meshive-hub-branding")) return;
     const style = document.createElement("style");
     style.id = "meshive-hub-branding";
     style.textContent = `.${HUB_ICON_CLASS} {
         display: inline-block;
-        width: 20px;
-        height: 20px;
+        width: 16px;
+        height: 16px;
         flex-shrink: 0;
         background: url(${JSON.stringify(LOGO_URL)}) center / contain no-repeat;
+    }
+    .${HUB_BUTTON_CLASS} {
+        border: 1px solid transparent;
+        background: linear-gradient(var(--comfy-menu-bg, #171718), var(--comfy-menu-bg, #171718)) padding-box, ${BRAND_GRADIENT} border-box;
+        color: var(--base-foreground, #fff);
+        gap: 6px;
+        padding-left: 8px;
+        padding-right: 11px;
+    }
+    .${HUB_BUTTON_CLASS}:hover, .${HUB_BUTTON_CLASS}.${OPEN_CLASS} {
+        background: linear-gradient(var(--secondary-background, #262729), var(--secondary-background, #262729)) padding-box, ${BRAND_GRADIENT} border-box;
+    }
+    [${BRAND_ATTR}] {
+        background: ${BRAND};
+        color: #fff;
+        border-color: transparent;
+    }
+    [${BRAND_ATTR}]:hover:not(:disabled) {
+        background: ${BRAND_HOVER};
     }`;
     document.head.append(style);
 }
@@ -273,12 +301,9 @@ export function closeHub() {
     markButton(false);
 }
 
-// Shows the top-bar button as pressed while the panel is open. Inline: the frontend's own utility
-// classes live in a CSS layer whose !important rules would beat a stylesheet of ours.
+// Shows the top-bar button as pressed while the panel is open.
 function markButton(open) {
-    const btn = document.querySelector(`.${HUB_BUTTON_CLASS}`);
-    if (open) btn?.style.setProperty("background", "var(--secondary-background-hover, rgba(127,127,127,0.25))", "important");
-    else btn?.style.removeProperty("background");
+    document.querySelector(`.${HUB_BUTTON_CLASS}`)?.classList.toggle(OPEN_CLASS, open);
 }
 
 export function openHub(info) {

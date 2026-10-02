@@ -46,7 +46,7 @@ globalThis.__api = {
         const ok = (body) => ({ ok: true, status: 200, headers: new Map(), json: async () => body });
         if (path === "/meshive/models/folders") return ok({ checkpoints: [], loras: [], vae: [] });
         if (path === "/meshive/models/check") return ok({ missing: body.models, unresolved: [] });
-        if (path === "/meshive/info") return ok({ version: "1.4.1" });
+        if (path === "/meshive/info") return ok({ version: "1.4.2" });
         if (path === "/meshive/hf/status") return ok({ env_token: false });
         if (path === "/meshive/download/status") return ok([]);
         if (path === "/meshive/models/size") return ok({});
@@ -80,12 +80,12 @@ try {
         assert.equal(browser.download, "weights.gguf");
         assert.equal(browser.target, "_blank");
         assert.equal(browser.rel, "noopener noreferrer");
-        assert.equal(podFor("gguf").textContent, "Install in Meshive Pod");
+        assert.equal(podFor("gguf").textContent, "Install in Pod");
     });
     check("an unknown directory keeps both actions but disables pod install until chosen", () => {
         assert.ok(document.querySelector('#unknown a[data-meshive-pod="browser-download"]'));
         assert.equal(podFor("unknown").disabled, true);
-        assert.equal(document.querySelector('[data-meshive-pod="all-button"]').textContent, "Install all in Meshive Pod (2)");
+        assert.equal(document.querySelector('[data-meshive-pod="all-button"]').textContent, "Install all in Pod (2)");
         assert.deepEqual([...document.querySelector('#unknown + div select').options].map((o) => o.value), ["", "checkpoints", "loras", "vae"]);
     });
     document.querySelector('[data-meshive-pod="all-button"]').click();

@@ -2,6 +2,7 @@ import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 import { T, SETTING, setting, debugLog } from "./meshive_core.js";
 import { workflowModels } from "./meshive_detect.js";
+import { BRAND_ATTR } from "./meshive_hub.js";
 
 // The check before a run (off by default): when a workflow is queued, the pod first confirms that
 // every model it uses is there — optionally down to the checksum — and if not, the run is held with
@@ -101,7 +102,12 @@ function showReport(report, { queueAnyway, install }) {
     const footer = el("div", { padding: "12px 16px", borderTop: "1px solid var(--border-default, #444)", display: "flex", justifyContent: "flex-end", gap: "8px", flexWrap: "wrap" });
     footer.append(button(T.cancel, closeGuard));
     if (installable.length) {
-        footer.append(button(T.guardInstall(installable.length), () => { closeGuard(); install(installable); }, "var(--primary-background, #3b82f6)"));
+        const b = button(T.guardInstall(installable.length), () => { closeGuard(); install(installable); }, "transparent");
+        // Colored by the branding stylesheet, like the install buttons in the Missing Models panel.
+        b.style.removeProperty("background");
+        b.style.removeProperty("color");
+        b.setAttribute(BRAND_ATTR, "");
+        footer.append(b);
     }
     footer.append(button(T.guardAnyway, () => { closeGuard(); queueAnyway(); }, "var(--warning-background, #d97706)"));
 

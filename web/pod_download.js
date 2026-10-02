@@ -5,13 +5,13 @@ import {
     control, refreshAll, refreshModels, checkVersion, toast, fmtBytes, debugLog, onChange, onReset, seqMark,
     isHfUrl, hfEnvStatus, setting, sizesOf,
 } from "./meshive_core.js";
-import { HUB_BUTTON_CLASS, HUB_ICON_CLASS, installHubBranding, toggleHub, openHub, rememberRequest, setInstaller } from "./meshive_hub.js";
+import { HUB_BUTTON_CLASS, HUB_ICON_CLASS, BRAND_ATTR, installHubBranding, toggleHub, openHub, rememberRequest, setInstaller } from "./meshive_hub.js";
 import { ensureTokenSection } from "./meshive_token.js";
 import { folderChoices, discoveredModels, choiceKey, preloadManagerModels, createWorkflowLinker, enrichMissingCandidates, attachModelMetadata } from "./meshive_detect.js";
 import { syncGuard, invalidateGuardCache } from "./meshive_guard.js";
 
 // ComfyUI's "Download" button in the Missing Models panel is a browser download, so the model
-// lands on the user's computer. Next to it we add "Install in Meshive Pod", which asks the
+// lands on the user's computer. Next to it we add "Install in Pod", which asks the
 // ComfyUI server in the pod (backend: __init__.py) to fetch the same URL itself.
 //
 // The hook points depend on the ComfyUI frontend version. Tested with comfyui-frontend-package
@@ -221,6 +221,7 @@ function ensureProgressArea(allLine) {
         if (retry.length) {
             const native = document.querySelector(`button[data-testid="${ALL_TESTID}"]`);
             const b = native ? makeButton(native, "retry") : el("button", {}, "");
+            b.setAttribute(BRAND_ATTR, "");
             b.textContent = label;
             b.addEventListener("click", (e) => { e.preventDefault(); e.stopPropagation(); startBatch(retryList()); });
             foot.append(b);
@@ -234,6 +235,7 @@ function makeButton(native, kind) {
     b.removeAttribute("data-testid");
     b.removeAttribute("aria-label");
     b.setAttribute(MARK, kind);
+    b.setAttribute(BRAND_ATTR, "");
     b.type = "button";
     b.disabled = false;
     // Our text is longer than the built-in one: wrap in a narrow panel instead of clipping or
@@ -327,8 +329,9 @@ function ensureRowsWithoutDownload(cands) {
             line.setAttribute(MARK, "row-alt");
             Object.assign(line.style, { display: "flex", justifyContent: "flex-end", paddingBottom: "2px" });
             const b = template ? makeButton(template, "row-button") : Object.assign(document.createElement("button"), { type: "button" });
-            if (!template) Object.assign(b.style, { padding: "4px 8px", borderRadius: "0.375rem", border: "1px solid var(--border-default, #444)", background: "var(--secondary-background, #333)", color: "var(--base-foreground, #eee)", fontSize: "0.75rem", cursor: "pointer" });
+            if (!template) Object.assign(b.style, { padding: "4px 8px", borderRadius: "0.375rem", border: "none", fontSize: "0.75rem", cursor: "pointer" });
             b.setAttribute(MARK, "row-button");
+            b.setAttribute(BRAND_ATTR, "");
             line.append(b);
             row.after(line);
             b.addEventListener("click", (e) => {

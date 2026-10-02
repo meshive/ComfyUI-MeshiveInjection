@@ -4,7 +4,7 @@ import { api } from "../../scripts/api.js";
 // Shared by the Missing Models buttons (pod_download.js) and the downloads panel (meshive_hub.js):
 // server calls, the download states the server reports, texts and small helpers.
 
-export const VERSION = "1.4.1";
+export const VERSION = "1.4.2";
 
 export const EVT = {
     progress: "meshive_download_progress",
@@ -30,7 +30,7 @@ const ko = (() => {
 
 // Button names are the same in every locale; everything else follows the locale.
 export const T = ko ? {
-    pod: "Install in Meshive Pod", podAll: "Install all in Meshive Pod", hub: "Meshive", download: "다운로드", chooseFolder: "저장할 모델 폴더를 선택하세요",
+    pod: "Install in Pod", podAll: "Install all in Pod", hub: "Meshive", download: "다운로드", chooseFolder: "저장할 모델 폴더를 선택하세요",
     hubTip: "Meshive Pod 다운로드와 설정", hubTitle: "Meshive Pod 다운로드",
     cancel: "취소", pause: "일시정지", resume: "이어받기", retry: "다시 시도",
     done: "Pod에 저장됨", doneTemp: "Pod에 저장됨(임시)",
@@ -38,7 +38,7 @@ export const T = ko ? {
     queued: "대기 중", paused: "일시정지", verifying: "검증 중", waiting: "스토리지 확장 대기", failed: "실패 — 다시 시도", exists: "이미 있음",
     status: { queued: "대기", downloading: "받는 중", waiting_storage: "공간 대기", verifying: "검증", paused: "일시정지", complete: "완료", exists: "이미 있음", error: "실패", cancelled: "취소됨" },
     queuePos: (n) => `대기 ${n}번째`, conns: (n) => `연결 ${n}개`, temporary: "임시 저장",
-    stats: (a, t) => `진행 ${a} / 전체 ${t}`, empty: "다운로드가 없습니다.\n누락 모델 목록에서 Install in Meshive Pod 를 누르세요.",
+    stats: (a, t) => `진행 ${a} / 전체 ${t}`, empty: "다운로드가 없습니다.\n누락 모델 목록에서 Install in Pod 를 누르세요.",
     refresh: "새로고침", clear: "완료 항목 지우기", close: "닫기", settings: "설정",
     verbose: "자세한 로그", verboseTip: "브라우저 콘솔에 다운로드 이벤트를 자세히 남깁니다.",
     progressTitle: "다운로드 진행", batch: (s) => `성공 ${s.ok}, 실패 ${s.failed}${s.cancelled ? `, 취소 ${s.cancelled}` : ""}${s.pending ? `, 남음 ${s.pending}` : ""}`,
@@ -60,7 +60,7 @@ export const T = ko ? {
     guardTitle: "누락된 모델이 있습니다", guardText: "이 워크플로에 필요한 모델 중 Pod 에 없거나 체크섬이 맞지 않는 것이 있어 실행을 멈췄습니다. 실패하거나 결과가 잘못 나오는 것을 막기 위해서입니다.",
     guardUnresolved: (n) => `${n}개 모델은 어느 폴더에 있어야 하는지 알 수 없어 확인하지 못했습니다.`,
     guardReason: { missing: "없음", hash_mismatch: "체크섬 불일치", directory_unresolved: "폴더 알 수 없음", invalid_filename: "이름 오류" },
-    guardInstall: (n) => `Install in Meshive Pod (${n})`, guardAnyway: "그래도 실행", folder: "폴더",
+    guardInstall: (n) => `Install in Pod (${n})`, guardAnyway: "그래도 실행", folder: "폴더",
     podSection: "Pod 서버 (이 Pod 의 ComfyUI 에 적용)",
     keepalive: "연결 유지", keepaliveTip: "45초마다 웹소켓에 ping 을 보내, 브라우저와 Pod 사이 프록시가 한가한 연결을 끊지 않게 합니다.",
     ramLimit: "Pod 메모리 한도 반영", ramTip: "컨테이너 메모리 한도를 모르는 구버전 ComfyUI 에 호스트 RAM 대신 Pod 의 한도를 알려 줍니다.",
@@ -72,7 +72,7 @@ export const T = ko ? {
     memLocked: "Pod 환경변수 COMFYUI_MESHIVEINJECTION_NO_RAM_PATCH 로 꺼져 있습니다.",
     podWord: "Pod",
 } : {
-    pod: "Install in Meshive Pod", podAll: "Install all in Meshive Pod", hub: "Meshive", download: "Download", chooseFolder: "Choose a model folder",
+    pod: "Install in Pod", podAll: "Install all in Pod", hub: "Meshive", download: "Download", chooseFolder: "Choose a model folder",
     hubTip: "Meshive Pod downloads and settings", hubTitle: "Meshive Pod downloads",
     cancel: "Cancel", pause: "Pause", resume: "Resume", retry: "Retry",
     done: "Saved in Pod", doneTemp: "Saved in Pod (temporary)",
@@ -80,7 +80,7 @@ export const T = ko ? {
     queued: "Queued", paused: "Paused", verifying: "Verifying", waiting: "Waiting for storage", failed: "Failed — retry", exists: "Already there",
     status: { queued: "Queued", downloading: "Downloading", waiting_storage: "Waiting", verifying: "Verifying", paused: "Paused", complete: "Done", exists: "Already there", error: "Failed", cancelled: "Cancelled" },
     queuePos: (n) => `#${n} in queue`, conns: (n) => `${n} connection${n === 1 ? "" : "s"}`, temporary: "temporary",
-    stats: (a, t) => `${a} active / ${t} tracked`, empty: "No downloads.\nUse Install in Meshive Pod in the missing models list.",
+    stats: (a, t) => `${a} active / ${t} tracked`, empty: "No downloads.\nUse Install in Pod in the missing models list.",
     refresh: "Refresh", clear: "Clear finished", close: "Close", settings: "Settings",
     verbose: "Verbose logs", verboseTip: "Log download events in detail to the browser console.",
     progressTitle: "Download progress", batch: (s) => `${s.ok} succeeded, ${s.failed} failed${s.cancelled ? `, ${s.cancelled} cancelled` : ""}${s.pending ? `, ${s.pending} remaining` : ""}`,
@@ -102,7 +102,7 @@ export const T = ko ? {
     guardTitle: "Missing models detected", guardText: "The run was stopped because some models this workflow needs are not in the pod or fail their checksum. This prevents a failed or broken run.",
     guardUnresolved: (n) => n === 1 ? "1 model could not be checked: the folder it belongs in is unknown." : `${n} models could not be checked: the folders they belong in are unknown.`,
     guardReason: { missing: "missing", hash_mismatch: "checksum mismatch", directory_unresolved: "unknown folder", invalid_filename: "bad name" },
-    guardInstall: (n) => `Install in Meshive Pod (${n})`, guardAnyway: "Queue anyway", folder: "Folder",
+    guardInstall: (n) => `Install in Pod (${n})`, guardAnyway: "Queue anyway", folder: "Folder",
     podSection: "Pod server (applies to this pod's ComfyUI)",
     keepalive: "Connection keepalive", keepaliveTip: "Ping the websocket every 45 s, so a proxy between the browser and the pod does not close an idle connection.",
     ramLimit: "Pod memory limit for ComfyUI", ramTip: "Tell a ComfyUI too old to know about container memory limits the pod's limit instead of the host's RAM.",

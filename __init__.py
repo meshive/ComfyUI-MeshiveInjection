@@ -99,7 +99,7 @@ from aiohttp import web
 import folder_paths
 from server import PromptServer
 
-__version__ = "1.4.1"
+__version__ = "1.4.2"
 
 WEB_DIRECTORY = "./web"
 NODE_CLASS_MAPPINGS = {}

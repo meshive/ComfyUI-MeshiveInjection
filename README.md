@@ -2,7 +2,7 @@
 
 A ComfyUI extension for [Meshive](https://meshive.ai) pods: missing models are downloaded **straight into your pod**, not to your computer.
 
-When a workflow needs a model you don't have, ComfyUI lists it under **Missing Models** with a **Download** button. That button saves the file to *your* computer — on a cloud pod you would then have to upload it again. This extension puts an **Install in Meshive Pod** button next to it. The pod downloads the model itself, saves it in the right folder, and the model is ready to use right away.
+When a workflow needs a model you don't have, ComfyUI lists it under **Missing Models** with a **Download** button. That button saves the file to *your* computer — on a cloud pod you would then have to upload it again. This extension puts an **Install in Pod** button next to it. The pod downloads the model itself, saves it in the right folder, and the model is ready to use right away.
 
 ## Installation
 
@@ -21,7 +21,7 @@ Then restart ComfyUI and reload the page. Nothing else needs to be installed.
 ## How to use it
 
 1. **Open a workflow.** If models are missing, ComfyUI shows an error. Open the error panel on the right and find **Missing Models**.
-2. **Click *Install in Meshive Pod*** under a model — or ***Install all in Meshive Pod*** under the list to get every missing model. ComfyUI's own **Download** buttons stay where they were.
+2. **Click *Install in Pod*** under a model — or ***Install all in Pod*** under the list to get every missing model. ComfyUI's own **Download** buttons stay where they were.
 3. **Watch it on the button.** It shows the progress and speed. When it is done, the model appears in the node's dropdown and disappears from the Missing Models list — no page reload needed.
 
 To follow all downloads, click the **Meshive** button in the top bar. It opens the downloads panel, where you can pause, resume, cancel or retry each download.
@@ -30,7 +30,7 @@ To follow all downloads, click the **Meshive** button in the top bar. It opens t
 
 | Button | Meaning | Clicking it |
 |---|---|---|
-| **Install in Meshive Pod** | Not installed yet | Starts the download |
+| **Install in Pod** | Not installed yet | Starts the download |
 | **Queued** | Waiting — downloads run one at a time | Cancels it |
 | **42% · 85 MB/s ✕** | Downloading | Cancels it |
 | **Paused · 42% ▶** | Paused; the downloaded part is kept | Resumes it |
@@ -45,11 +45,11 @@ A download that stops halfway — a lost connection, a pause, ComfyUI restarting
 
 ### Models whose download link is only in a note
 
-Many workflows put the download links in a note instead of attaching them to the model, so ComfyUI can't offer a Download button for those models. When you open a workflow, the extension looks for such links — in notes and other text in the workflow, and in ComfyUI-Manager's model list if you have it — and adds them. Those models then get a Download button and *Install in Meshive Pod* like any other.
+Many workflows put the download links in a note instead of attaching them to the model, so ComfyUI can't offer a Download button for those models. When you open a workflow, the extension looks for such links — in notes and other text in the workflow, and in ComfyUI-Manager's model list if you have it — and adds them. Those models then get a Download button and *Install in Pod* like any other.
 
 If the extension can't tell which folder a model belongs in, a **folder choice** appears next to its button. Pick the folder before installing.
 
-ComfyUI shows no Download button for some file types (such as `.gguf`). Those models still get *Install in Meshive Pod*, and a **Download** link for your computer.
+ComfyUI shows no Download button for some file types (such as `.gguf`). Those models still get *Install in Pod*, and a **Download** link for your computer.
 
 ## Models that need a login (gated models)
 
@@ -89,7 +89,7 @@ Two more settings, in the downloads panel only, apply to the whole pod:
 
 ## Troubleshooting
 
-- **There is no *Install in Meshive Pod* button for a model.** The workflow doesn't say where to download that model from. Look it up on Hugging Face or Civitai and download it another way — for example through ComfyUI-Manager's model list.
+- **There is no *Install in Pod* button for a model.** The workflow doesn't say where to download that model from. Look it up on Hugging Face or Civitai and download it another way — for example through ComfyUI-Manager's model list.
 - **The button is greyed out.** Choose a folder in the folder choice next to it, or the model is already installed.
 - **"Authentication required" or "Access denied".** The model is gated: see [Models that need a login](#models-that-need-a-login-gated-models).
 - **"Storage is full and did not grow".** The pod's storage limit was reached. Free up space or increase the limit, then click the button again — the download continues where it stopped.
