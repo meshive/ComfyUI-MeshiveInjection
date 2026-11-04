@@ -39,15 +39,19 @@ Engine:
   * Pause closes the connections and frees the queue for the next download; resume puts the
     download back at the front of the queue.
   * A file that already exists is left alone, unless it is the very file this extension would
-    install and the workflow gives a sha256 it does not match: then a new copy is downloaded,
+    install and the workflow gives a checksum it does not match: then a new copy is downloaded,
     verified and swapped in, so a failed download never costs the old file. Only when the disk
     cannot hold both copies is the old one removed first.
+  * Checksums are sha256, or blake3 (ComfyUI's asset system uses it) when the `blake3` package is
+    installed, as it is wherever ComfyUI's own requirements are. A hash of any other type is
+    ignored rather than refused, so the model still installs.
   The parallel ranges, the queue, pause/resume, the replacement of a file that fails its checksum
   and the Hugging Face access messages follow ComfyUI-RunpodDirect by Madiator2011
   (https://github.com/MadiatorLabs/ComfyUI-RunpodDirect, GPL-3.0).
 
 Security (this runs inside the pod, so a server-side request forgery would reach the pod's network):
-  * The first URL must be https on an allowed host (huggingface.co, civitai.com and subdomains).
+  * The first URL must be https on an allowed host (huggingface.co, civitai.com, civitai.red and
+    subdomains).
   * Redirects are followed by hand (at most MAX_REDIRECTS). Hugging Face and Civitai hand the
     file off to CDN hosts, so redirect targets are not allow-listed — instead every connection
     goes through `SafeResolver`, which refuses any host that resolves to a non-public address
@@ -99,7 +103,7 @@ from aiohttp import web
 import folder_paths
 from server import PromptServer
 
-__version__ = "1.4.2"
+__version__ = "1.4.3"
 
 WEB_DIRECTORY = "./web"
 NODE_CLASS_MAPPINGS = {}
@@ -109,7 +113,7 @@ __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
 
 log = logging.getLogger("meshive.pod_download")
 
-ALLOWED_HOSTS = ("huggingface.co", "civitai.com")
+ALLOWED_HOSTS = ("huggingface.co", "civitai.com", "civitai.red")
 ALLOWED_EXTENSIONS = (".safetensors", ".sft", ".ckpt", ".pt", ".pth", ".bin", ".gguf", ".onnx")
 MAX_REDIRECTS = 5
 # Downloads run one at a time, each over up to CONNECTIONS parallel range requests. Files up to
@@ -232,6 +236,11 @@ def _host_allowed(host: str) -> bool:
     return any(_is_host(host, h) for h in ALLOWED_HOSTS)
 
 
+def _is_civitai(host: str) -> bool:
+    """civitai.red is Civitai's other domain: the same files and the same API key."""
+    return _is_host(host, "civitai.com") or _is_host(host, "civitai.red")
+
+
 def _validate_source_url(url: str) -> str:
     parts = urlsplit(url)
     if parts.scheme != "https":
@@ -256,7 +265,7 @@ def _auth_headers(url: str, hf_token: str = "") -> dict:
     host = urlsplit(url).hostname
     if _is_host(host, "huggingface.co"):
         token = hf_token or _env_hf_token()
-    elif _is_host(host, "civitai.com"):
+    elif _is_civitai(host):
         token = os.environ.get("CIVITAI_TOKEN")
     else:
         token = None
@@ -291,15 +300,42 @@ def _model_path(folder: str, name: str) -> str:
     return path
 
 
-def _expected_sha256(value, hash_type) -> str:
-    """The expected sha256 as 64 lowercase hex digits, or "" when there is none to check against.
-    Other hash types are ignored rather than refused, so the model still installs."""
+# Checksums this extension can compute: sha256 always, blake3 (what ComfyUI's asset system uses)
+# when the `blake3` package is installed, as it is wherever ComfyUI's own requirements are.
+HASH_ALGORITHMS = ("sha256", "blake3")
+
+
+def _hash_algorithm(name) -> str | None:
+    n = str(name or "").strip().lower().replace("-", "").replace("_", "")
+    return n if n in HASH_ALGORITHMS else None
+
+
+def _can_hash(algo: str) -> bool:
+    if algo == "blake3":
+        try:
+            return importlib.util.find_spec("blake3") is not None
+        except (ImportError, ValueError):
+            return False
+    return algo == "sha256"
+
+
+def _expected_hash(value, hash_type) -> tuple[str, str] | None:
+    """(algorithm, 64 lowercase hex digits) to check the file against, or None when there is nothing
+    to check: no hash, a malformed one, or an algorithm this extension cannot compute — those are
+    ignored rather than refused, so the model still installs. An "sha256:" or "blake3:" prefix on
+    the hash names the algorithm; otherwise `hash_type` does, and sha256 is assumed without it."""
     v = str(value or "").strip().lower()
-    if v.startswith("sha256:"):
-        v = v[len("sha256:"):]
-    if str(hash_type or "sha256").strip().lower() not in ("sha256", "sha-256"):
-        return ""
-    return v if len(v) == 64 and all(c in "0123456789abcdef" for c in v) else ""
+    algo = None
+    for name in HASH_ALGORITHMS:
+        if v.startswith(name + ":"):
+            algo, v = name, v[len(name) + 1:]
+    if algo is None:
+        algo = _hash_algorithm(hash_type or "sha256")
+    if algo is None or not _can_hash(algo):
+        return None
+    if len(v) != 64 or any(c not in "0123456789abcdef" for c in v):
+        return None
+    return algo, v
 
 
 # Folders that must not receive models even though they are storage-backed: output and config
@@ -453,7 +489,7 @@ def _http_error(resp, url: str, hf_token: str = "") -> Exception:
     status, host = resp.status, resp.url.host
     if status in (401, 403, 451) and _is_host(host, "huggingface.co"):
         return DownloadError(_hf_access_message(status, url, hf_token), code="hf_auth")
-    if status in (401, 403) and _is_host(host, "civitai.com"):
+    if status in (401, 403) and _is_civitai(host):
         return DownloadError(f"Civitai refused the download ({status}). This model needs an API key: "
                              "set CIVITAI_TOKEN in the pod environment.")
     if status in (401, 403, 451):
@@ -1001,8 +1037,15 @@ class _HashAborted(Exception):
     pass
 
 
-def _sha256_file(path: str, abort: threading.Event) -> str:
-    h = hashlib.sha256()
+def _new_hasher(algo: str):
+    if algo == "blake3":
+        from blake3 import blake3  # present whenever _can_hash let a blake3 digest be expected
+        return blake3()
+    return hashlib.sha256()
+
+
+def _digest_file(path: str, algo: str, abort: threading.Event) -> str:
+    h = _new_hasher(algo)
     with open(path, "rb") as f:
         for block in iter(lambda: f.read(8 * 1024 * 1024), b""):
             if abort.is_set():
@@ -1012,7 +1055,7 @@ def _sha256_file(path: str, abort: threading.Event) -> str:
 
 
 async def _hash_file(st: dict, path: str) -> str:
-    return await asyncio.get_running_loop().run_in_executor(None, _sha256_file, path, st["abort"])
+    return await asyncio.get_running_loop().run_in_executor(None, _digest_file, path, st["hash_type"], st["abort"])
 
 
 def _rename_noreplace(source: str, target: str):
@@ -1074,8 +1117,8 @@ async def _download(st: dict):
             st["status"] = "exists"
             return
         st["mismatch"] = True  # remembered, so a resume does not hash the old file again
-        log.warning("download %s: %s does not match the expected sha256 — downloading a new copy",
-                    st["id"], dest_path)
+        log.warning("download %s: %s does not match the expected %s — downloading a new copy",
+                    st["id"], dest_path, st["hash_type"])
 
     st.update(status="downloading", error=None, error_code=None, speed=0)
     await _emit(EVT_PROGRESS, _public(st))
@@ -1113,7 +1156,7 @@ async def _download(st: dict):
         await _emit(EVT_PROGRESS, _public(st))
         if await _unless_stopped(st, _hash_file(st, part_path)) != st["hash"]:
             _remove_partial(st)  # a corrupt file is not worth resuming
-            raise DownloadError("sha256 mismatch — the downloaded file was removed")
+            raise DownloadError(f"{st['hash_type']} mismatch — the downloaded file was removed")
 
     if st.get("mismatch") and os.path.exists(dest_path):
         os.replace(part_path, dest_path)  # the verified copy takes the old one's place atomically
@@ -1201,7 +1244,7 @@ async def start_download(request):
         directory = str(body.get("directory", ""))
         if directory not in folder_paths.folder_names_and_paths:
             raise ValueError(f"unknown model directory: {directory}")
-        expected = _expected_sha256(body.get("hash"), body.get("hash_type"))
+        expected = _expected_hash(body.get("hash"), body.get("hash_type"))
         # A Hugging Face token typed into the page: only for Hugging Face, and only while this download lives.
         token = str(body.get("token") or "")
         if token and not _HF_TOKEN_RE.fullmatch(token):
@@ -1246,7 +1289,8 @@ async def start_download(request):
     st = {
         "id": uuid.uuid4().hex[:12], "seq": _seq, "url": url, "filename": filename, "directory": directory,
         "dest_path": dest_path, "part_path": f"{dest_path}.{_HOST_TAG}{PART_SUFFIX}", "managed": managed,
-        "temporary": temporary, "hash": expected, "replace": replace, "token": token, "status": "queued",
+        "temporary": temporary, "hash": expected[1] if expected else "", "hash_type": expected[0] if expected else "",
+        "replace": replace, "token": token, "status": "queued",
         "downloaded": 0, "received": 0, "total": 0, "speed": 0, "error": None, "connections": 0, "resumable": False,
         "segments": [], "waiting": 0, "stop": asyncio.Event(), "abort": threading.Event(), "stop_reason": None,
     }
@@ -1339,29 +1383,40 @@ async def download_status(request):
 
 MAX_CHECK_MODELS = 512
 MAX_SIZE_URLS = 32
-# path -> ((inode, size, mtime_ns, ctime_ns), sha256): a file that did not change is not hashed again.
-_hash_cache: dict[str, tuple[tuple, str]] = {}
-# path -> the hashing in progress, shared by concurrent checks of the same file
-_hashing: dict[str, asyncio.Future] = {}
+# (path, algorithm) -> ((inode, size, mtime_ns, ctime_ns), digest): a file that did not change is not
+# hashed again.
+_hash_cache: dict[tuple[str, str], tuple[tuple, str]] = {}
+# (path, algorithm) -> the hashing in progress, shared by concurrent checks of the same file
+_hashing: dict[tuple[str, str], asyncio.Future] = {}
 
 
 def _model_folders() -> list[str]:
     return [d for d in folder_paths.folder_names_and_paths if d not in ("custom_nodes", "configs")]
 
 
-async def _cached_sha256(path: str) -> str:
+async def _cached_digest(path: str, algo: str) -> str:
     st = os.stat(path)
     ident = (st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
-    hit = _hash_cache.get(path)
+    key = (path, algo)
+    hit = _hash_cache.get(key)
     if hit and hit[0] == ident:
         return hit[1]
-    running = _hashing.get(path)
+    running = _hashing.get(key)
     if running is None:
-        running = asyncio.ensure_future(asyncio.get_running_loop().run_in_executor(None, _sha256_file, path, threading.Event()))
-        _hashing[path] = running
-        running.add_done_callback(lambda _: _hashing.pop(path, None))
-    digest = await asyncio.shield(running)
-    _hash_cache[path] = (ident, digest)
+        running = asyncio.ensure_future(
+            asyncio.get_running_loop().run_in_executor(None, _digest_file, path, algo, threading.Event()))
+        _hashing[key] = running
+        # For a waiter that was cancelled before the hashing finished.
+        running.add_done_callback(lambda fut: _hashing.pop(key, None) if _hashing.get(key) is fut else None)
+    try:
+        digest = await asyncio.shield(running)
+    finally:
+        # Not left to the callback above: when the thread was already done, Python 3.13 completes the
+        # future at once and the callback only runs on the next loop iteration — a check in the same
+        # iteration would then reuse this digest for a file that has changed since.
+        if running.done() and _hashing.get(key) is running:
+            _hashing.pop(key, None)
+    _hash_cache[key] = (ident, digest)
     return digest
 
 
@@ -1397,8 +1452,8 @@ async def _check_model(raw: dict, verify_hashes: bool) -> tuple[str, dict]:
                 return "missing", {**report, "directory": hint, "reason": "missing", "guessed": True}
             return "unresolved", {**report, "reason": "directory_unresolved"}
         directory, path = found, folder_paths.get_full_path(found, name)
-    expected = _expected_sha256(raw.get("hash"), raw.get("hash_type"))
-    if verify_hashes and expected and await _cached_sha256(path) != expected:
+    expected = _expected_hash(raw.get("hash"), raw.get("hash_type"))
+    if verify_hashes and expected and await _cached_digest(path, expected[0]) != expected[1]:
         return "missing", {**report, "directory": directory, "reason": "hash_mismatch", "corrupted": True}
     return "ok", {**report, "directory": directory}
 
@@ -1450,10 +1505,10 @@ async def verify_model(request):
     path = folder_paths.get_full_path(directory, name)
     if not path:
         return web.json_response({"exists": False, "valid": False, "reason": "missing"})
-    expected = _expected_sha256(body.get("hash"), body.get("hash_type"))
+    expected = _expected_hash(body.get("hash"), body.get("hash_type"))
     if not expected:
         return web.json_response({"exists": True, "valid": True, "hash_verified": False, "reason": "no_hash"})
-    ok = await _cached_sha256(path) == expected
+    ok = await _cached_digest(path, expected[0]) == expected[1]
     return web.json_response({"exists": True, "valid": ok, "hash_verified": ok,
                               "reason": "ok" if ok else "hash_mismatch"})
 

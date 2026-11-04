@@ -414,8 +414,11 @@ export function enrichMissingCandidates(list, models) {
         if (!c.isMissing || (c.url && c.directory)) return c;
         const m = models.find((m) => m.name === c.name && (!c.url || c.url === m.url)
             && (!c.directory || !m.directory || c.directory === m.directory));
-        return m ? { ...c, url: c.url || m.url, directory: c.directory || m.directory,
-            hash: c.hash || m.hash, hash_type: c.hash_type || m.hash_type } : c;
+        if (!m) return c;
+        // The frontend reads `hashType` from its candidates; the workflow format (and this extension) `hash_type`.
+        const hashType = c.hashType || c.hash_type || m.hash_type;
+        return { ...c, url: c.url || m.url, directory: c.directory || m.directory,
+            hash: c.hash || m.hash, ...(hashType ? { hashType, hash_type: hashType } : {}) };
     });
 }
 

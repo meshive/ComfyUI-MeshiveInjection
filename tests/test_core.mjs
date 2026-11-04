@@ -152,6 +152,15 @@ await test("checking again without typing uses the page's token, and drops it on
     assert.equal(core.hfState().hasPageToken, false);
 });
 
+await test("the hash type reaches the server whichever name the candidate uses", async () => {
+    const sent = [];
+    routes["/meshive/download/start"] = (body) => { sent.push(body); return { status: "exists" }; };
+    await core.startDownload({ name: "a.safetensors", directory: "loras", url: "u", hash: "ab", hashType: "blake3" });
+    await core.startDownload({ name: "a.safetensors", directory: "loras", url: "u", hash: "ab", hash_type: "SHA256", hashType: "blake3" });
+    await core.startDownload({ name: "a.safetensors", directory: "loras", url: "u", hash: "ab" });
+    assert.deepEqual(sent.map((b) => b.hash_type), ["blake3", "SHA256", undefined]);
+});
+
 await test("a rejected token is not kept", async () => {
     routes["/meshive/hf/verify"] = { valid: false, error: "Hugging Face did not accept the token" };
     const r = await core.hfVerify("hf_wrongtoken123", []);

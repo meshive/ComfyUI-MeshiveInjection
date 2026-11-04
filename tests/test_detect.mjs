@@ -269,6 +269,24 @@ await test("candidate enrichment preserves existing links and separate model dir
     assert.equal(enriched[3].directory, null);
 });
 
+await test("candidate enrichment carries the hash type under both names", async () => {
+    const list = [
+        { name: "x.safetensors", directory: "vae", isMissing: true, hash: "ab", hashType: "blake3" },
+        { name: "y.safetensors", directory: "vae", isMissing: true },
+        { name: "z.safetensors", directory: "vae", isMissing: true },
+    ];
+    const models = [
+        { name: "x.safetensors", directory: "vae", url: "https://huggingface.co/a/b/resolve/main/x.safetensors", hash: "cd", hash_type: "sha256" },
+        { name: "y.safetensors", directory: "vae", url: "https://huggingface.co/a/b/resolve/main/y.safetensors", hash: "ef", hash_type: "SHA256" },
+        { name: "z.safetensors", directory: "vae", url: "https://huggingface.co/a/b/resolve/main/z.safetensors" },
+    ];
+    const enriched = d.enrichMissingCandidates(list, models);
+    assert.deepEqual([enriched[0].hash, enriched[0].hashType, enriched[0].hash_type], ["ab", "blake3", "blake3"]);
+    assert.deepEqual([enriched[1].hash, enriched[1].hashType, enriched[1].hash_type], ["ef", "SHA256", "SHA256"]);
+    assert.equal(enriched[2].url, models[2].url);
+    assert.ok(!("hashType" in enriched[2]) && !("hash_type" in enriched[2]));
+});
+
 rmSync(tmp, { recursive: true, force: true });
 let failed = 0;
 for (const [state, name, err] of results) {

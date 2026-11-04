@@ -20,6 +20,7 @@ import { syncGuard, invalidateGuardCache } from "./meshive_guard.js";
 //   * data:     the Pinia `missingModel` store's `missingModelCandidates` ({name, directory, url, hash?})
 //   * position: the `data-testid="missing-model-download"` / `"missing-model-download-all"` buttons
 // Re-check both whenever the frontend is upgraded. If they are gone, the extension adds nothing.
+// Both were also checked in the source of 1.57.6 (ComfyUI v0.44.0) and 1.60.0.
 
 const ROW_TESTID = "missing-model-download";
 const ALL_TESTID = "missing-model-download-all";
@@ -363,7 +364,7 @@ function ensureBrowserDownload(row, c, template) {
     try {
         url = new URL(c.url);
         if (url.protocol !== "https:" || url.username || url.password
-            || !["huggingface.co", "civitai.com"].some((host) => url.hostname === host || url.hostname.endsWith(`.${host}`))) throw new Error("unsupported URL");
+            || !["huggingface.co", "civitai.com", "civitai.red"].some((host) => url.hostname === host || url.hostname.endsWith(`.${host}`))) throw new Error("unsupported URL");
     } catch { link?.remove(); return; }
     if (!link) {
         link = document.createElement("a");

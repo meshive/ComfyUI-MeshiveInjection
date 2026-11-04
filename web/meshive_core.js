@@ -4,7 +4,7 @@ import { api } from "../../scripts/api.js";
 // Shared by the Missing Models buttons (pod_download.js) and the downloads panel (meshive_hub.js):
 // server calls, the download states the server reports, texts and small helpers.
 
-export const VERSION = "1.4.2";
+export const VERSION = "1.4.3";
 
 export const EVT = {
     progress: "meshive_download_progress",
@@ -150,6 +150,8 @@ export const isRunning = (st) => isActive(st) && st.status !== "paused";
 export const isDone = (st) => !!st && ["complete", "exists"].includes(st.status);
 export const isFinished = (st) => !!st && ["complete", "exists", "error", "cancelled"].includes(st.status);
 export const isLocal = (st) => String(st?.id ?? "").startsWith("local:");
+// The frontend's own candidates carry `hashType`; the workflow format and this extension `hash_type`.
+export const hashTypeOf = (c) => c?.hash_type ?? c?.hashType ?? undefined;
 
 let maxSeq = 0;
 let lastLocalSeq = 0;
@@ -280,7 +282,7 @@ export async function startDownload(c) {
     let r;
     try {
         r = await post("/meshive/download/start", {
-            url: c.url, directory: c.directory, filename: c.name, hash: c.hash, hash_type: c.hash_type,
+            url: c.url, directory: c.directory, filename: c.name, hash: c.hash, hash_type: hashTypeOf(c),
             token: hf.token && isHfUrl(c.url) ? hf.token : undefined,
         });
     } catch (e) {

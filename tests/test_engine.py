@@ -197,10 +197,12 @@ class ServerCase(unittest.IsolatedAsyncioTestCase):
     def url(self, name="model.safetensors"):
         return f"http://127.0.0.1:{self.port}/{name}"
 
-    async def start(self, name="model.safetensors", hash_=None, url=None):
+    async def start(self, name="model.safetensors", hash_=None, url=None, hash_type=None):
         body = {"url": url or self.url(name), "directory": "checkpoints", "filename": name}
         if hash_:
             body["hash"] = hash_
+        if hash_type:
+            body["hash_type"] = hash_type
         return body_of(await m.start_download(Request(body)))
 
     async def control(self, action, did):
@@ -248,6 +250,22 @@ class EngineTest(ServerCase):
             self.assertEqual(f.read(), self.fs.data)
         ranges = [g for g in self.fs.gets if g and g != "bytes=0-0"]
         self.assertEqual(len(ranges), m.CONNECTIONS)
+
+    @unittest.skipUnless(m._can_hash("blake3"), "blake3 is not installed")
+    async def test_blake3_checksum_is_verified(self):
+        from blake3 import blake3
+        st = await self.start(hash_=blake3(self.fs.data).hexdigest(), hash_type="blake3")
+        done = await self.wait_event(m.EVT_COMPLETE, st["id"])
+        self.assertEqual(done["status"], "complete")
+        st = await self.start("other.safetensors", hash_="blake3:" + "0" * 64)
+        err = await self.wait_event(m.EVT_ERROR, st["id"])
+        self.assertIn("blake3 mismatch", err["error"])
+        self.assertFalse(os.path.exists(self.dest("other.safetensors")))
+
+    async def test_a_hash_of_an_unknown_type_is_not_checked(self):
+        st = await self.start(hash_="0" * 64, hash_type="md5")
+        done = await self.wait_event(m.EVT_COMPLETE, st["id"])
+        self.assertEqual(done["status"], "complete")
         self.assertEqual(self.leftovers(), [])
 
     async def test_free_connections_take_over_a_slow_range(self):
@@ -821,6 +839,42 @@ class ModelCheckTest(ServerCase):
         r = await self.check([{"filename": "same.safetensors", "directory": "checkpoints", "hash": good}], verify=True)
         self.assertEqual(r["missing"][0]["reason"], "hash_mismatch")
 
+    async def test_checksum_cache_forgets_a_hash_that_finished_before_it_was_awaited(self):
+        # Python 3.13 completes run_in_executor's future at once when the thread is already done, so
+        # a done callback has not run yet when the next check in the same loop iteration looks.
+        loop = asyncio.get_running_loop()
+
+        def eager(executor, fn, *args):
+            fut = loop.create_future()
+            fut.set_result(fn(*args))
+            return fut
+
+        path = self.put("quick.safetensors", b"aaaa")
+        good = hashlib.sha256(b"aaaa").hexdigest()
+        loop.run_in_executor = eager
+        try:
+            r = await self.check([{"filename": "quick.safetensors", "directory": "checkpoints", "hash": good}], verify=True)
+            self.assertEqual(r["missing"], [])
+            with open(path, "wb") as f:
+                f.write(b"bbbb")
+            r = await self.check([{"filename": "quick.safetensors", "directory": "checkpoints", "hash": good}], verify=True)
+            self.assertEqual(r["missing"][0]["reason"], "hash_mismatch")
+        finally:
+            del loop.run_in_executor
+        self.assertEqual(m._hashing, {})
+
+    @unittest.skipUnless(m._can_hash("blake3"), "blake3 is not installed")
+    async def test_checks_accept_blake3(self):
+        from blake3 import blake3
+        self.put("b3.safetensors", b"abc")
+        good = "blake3:" + blake3(b"abc").hexdigest()
+        r = await self.check([{"filename": "b3.safetensors", "directory": "checkpoints", "hash": good}], verify=True)
+        self.assertEqual(r["missing"], [])
+        r = await self.check([{"filename": "b3.safetensors", "directory": "checkpoints", "hash": "0" * 64, "hash_type": "blake3"}], verify=True)
+        self.assertEqual(r["missing"][0]["reason"], "hash_mismatch")
+        v = body_of(await m.verify_model(Request({"directory": "checkpoints", "filename": "b3.safetensors", "hash": good})))
+        self.assertEqual((v["valid"], v["reason"]), (True, "ok"))
+
     async def test_existing_subfolder_model_creates_no_folder(self):
         self.put("there/model.safetensors")
         st = await self.start("there/model.safetensors", url=self.url())
@@ -1035,11 +1089,25 @@ class MessageTest(unittest.TestCase):
         self.assertTrue(m._retryable(m._http_error(self.resp(503, "https://x.test/"), "https://x.test/")))
         self.assertTrue(m._retryable(m._http_error(self.resp(429, "https://x.test/"), "https://x.test/")))
 
-    def test_expected_sha256(self):
+    def test_expected_hash(self):
         h = "ab" * 32
-        self.assertEqual(m._expected_sha256("SHA256:" + h.upper(), None), h)
-        self.assertEqual(m._expected_sha256(h, "blake3"), "")
-        self.assertEqual(m._expected_sha256("xyz", None), "")
+        self.assertEqual(m._expected_hash("SHA256:" + h.upper(), None), ("sha256", h))
+        self.assertEqual(m._expected_hash(h, "sha-256"), ("sha256", h))
+        b3 = ("blake3", h) if m._can_hash("blake3") else None
+        self.assertEqual(m._expected_hash(h, "BLAKE3"), b3)
+        self.assertEqual(m._expected_hash("blake3:" + h, "sha256"), b3)  # the prefix names the algorithm
+        self.assertIsNone(m._expected_hash(h, "md5"))
+        self.assertIsNone(m._expected_hash("xyz", None))
+        self.assertIsNone(m._expected_hash("", "sha256"))
+
+    def test_civitai_red_is_civitai(self):
+        self.assertTrue(m._host_allowed("civitai.red"))
+        self.assertTrue(m._host_allowed("www.civitai.red"))
+        self.assertFalse(m._host_allowed("civitai.red.evil.test"))
+        url = "https://civitai.red/api/download/models/1"
+        with patch.dict(os.environ, {"CIVITAI_TOKEN": "key"}):
+            self.assertEqual(m._auth_headers(url), {"Authorization": "Bearer key"})
+        self.assertIn("CIVITAI_TOKEN", str(m._http_error(self.resp(401, url), url)))
 
     def test_content_range(self):
         self.assertEqual(m._parse_content_range("bytes 5-9/10"), (5, 9, 10))

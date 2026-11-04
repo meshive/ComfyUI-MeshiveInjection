@@ -99,7 +99,7 @@ Two more settings, in the downloads panel only, apply to the whole pod:
 
 The download runs inside your pod, so the extension only fetches what it should:
 
-- Only secure (`https`) links from **huggingface.co** and **civitai.com** are downloaded.
+- Only secure (`https`) links from **huggingface.co**, **civitai.com** and **civitai.red** are downloaded.
 - It refuses to connect to private or internal network addresses, even through redirects.
 - Files are saved only into ComfyUI model folders, and only model file types (`.safetensors`, `.sft`, `.ckpt`, `.pt`, `.pth`, `.bin`, `.gguf`, `.onnx`).
 - Tokens are sent only to Hugging Face or Civitai themselves — never to the download servers they redirect to.
