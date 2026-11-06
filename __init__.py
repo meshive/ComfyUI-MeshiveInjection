@@ -23,6 +23,7 @@ Routes (ComfyUI also registers each one under the `/api` prefix):
     POST /meshive/models/size       {urls, token?}: file sizes, asked the way a download would ask
     GET  /meshive/hf/status         {env_token}: is there a Hugging Face token in the pod environment
     POST /meshive/hf/verify         {token?, urls?}: who the token belongs to, and which URLs it can fetch
+    GET  /meshive/manager/models    ?mode=local|cache: ComfyUI-Manager's model list ({models}), read from its files
 The extension's own scripts are served with no-cache headers (and X-Version), so an update is
 picked up on the next page load.
 
@@ -80,6 +81,7 @@ Meshive storage:
 
 import asyncio
 import concurrent.futures
+import configparser
 import ctypes
 import errno
 import hashlib
@@ -103,7 +105,7 @@ from aiohttp import web
 import folder_paths
 from server import PromptServer
 
-__version__ = "1.4.3"
+__version__ = "1.4.4"
 
 WEB_DIRECTORY = "./web"
 NODE_CLASS_MAPPINGS = {}
@@ -1566,6 +1568,132 @@ async def download_targets(request):
             entry["error"] = str(e)
         out[directory] = entry
     return web.json_response({"managed_roots": roots, "host": _HOST_TAG, "targets": out})
+
+
+# ---------------------------------------------------------------------------- #
+#                          ComfyUI-Manager's model list                        #
+# ---------------------------------------------------------------------------- #
+# The workflow scan looks up models without a link in ComfyUI-Manager's model list. The legacy
+# Manager (a custom node) serves that list at /externalmodel/getlist, and ComfyUI's built-in Manager
+# (the `comfyui_manager` package) at /v2/externalmodel/getlist, but only in its legacy interface:
+# its default interface has no such route. This route reads the same files for it — the list the
+# Manager ships with, and the copy of a channel's list it downloads into its cache. Nothing is
+# fetched from the network here.
+
+MANAGER_LIST_FILE = "model-list.json"
+MANAGER_DEFAULT_CHANNEL = "https://raw.githubusercontent.com/ltdrdata/ComfyUI-Manager/main"
+MAX_MANAGER_LIST_BYTES = 32 * 1024**2
+# real path -> ((inode, size, mtime_ns), response body): a list is read again only when it changes.
+_manager_lists: dict[str, tuple[tuple, str]] = {}
+
+
+def _manager_dirs() -> list[str]:
+    """Folders of the installed Manager: the built-in package first, then a legacy custom node."""
+    dirs = []
+    try:
+        spec = importlib.util.find_spec("comfyui_manager")  # located, not imported
+    except (ImportError, ValueError):
+        spec = None
+    if spec is not None:
+        dirs.extend(spec.submodule_search_locations or [])
+    try:
+        roots = folder_paths.get_folder_paths("custom_nodes")
+    except (KeyError, AttributeError):
+        roots = []
+    for root in roots:
+        try:
+            names = sorted(os.listdir(root))
+        except OSError:
+            continue
+        dirs.extend(os.path.join(root, n) for n in names if n.lower() == "comfyui-manager")
+    return dirs
+
+
+def _manager_files_dir() -> str:
+    """The Manager's folder in ComfyUI's user folder (config.ini, cache/), where the Manager keeps it."""
+    system_dir = getattr(folder_paths, "get_system_user_directory", None)
+    if system_dir is not None:
+        return system_dir("manager")
+    return os.path.join(folder_paths.get_user_directory(), "default", "ComfyUI-Manager")
+
+
+def _manager_cache_files(files_dir: str) -> list[str]:
+    """Where the Manager may keep its cached download of the model list, in the order to try them.
+    It names the file after a hash of the list's URL. It reads the cache under the channel set in
+    its config.ini, but at startup it downloads the list from its default channel and names the file
+    after that, unless `default_cache_as_channel_url` is on. So the configured channel's name comes
+    first, then the default channel's (one name when they are the same)."""
+    try:
+        config = configparser.ConfigParser(strict=False)
+        config.read(os.path.join(files_dir, "config.ini"), encoding="utf-8")
+        channel = config["default"].get("channel_url", MANAGER_DEFAULT_CHANNEL)
+    except Exception:  # noqa: BLE001 — the Manager falls back to its defaults the same way
+        channel = MANAGER_DEFAULT_CHANNEL
+    files = []
+    for url in dict.fromkeys((channel, MANAGER_DEFAULT_CHANNEL)):
+        h = 0
+        for ch in f"{url}/{MANAGER_LIST_FILE}":
+            h = (h * 31 + ord(ch)) % 2**32
+        files.append(os.path.join(files_dir, "cache", f"{h}_{MANAGER_LIST_FILE}"))
+    return files
+
+
+def _read_manager_list(path: str, root: str) -> str | None:
+    """The response body for one model list file, or None when it is not a usable list: one with
+    no entries is not, so it does not hide the next file. The file must stay inside `root` (no link
+    out of it) and below MAX_MANAGER_LIST_BYTES."""
+    try:
+        real = os.path.realpath(path)
+        if not _within(real, os.path.realpath(root)) or not os.path.isfile(real):
+            return None
+        st = os.stat(real)
+        if st.st_size > MAX_MANAGER_LIST_BYTES:
+            return None
+        ident = (st.st_ino, st.st_size, st.st_mtime_ns)
+        hit = _manager_lists.get(real)
+        if hit and hit[0] == ident:
+            return hit[1]
+        with open(real, encoding="utf-8") as f:
+            raw = f.read(MAX_MANAGER_LIST_BYTES + 1)
+        if len(raw) > MAX_MANAGER_LIST_BYTES:
+            return None
+        data = json.loads(raw)
+    except (OSError, ValueError):
+        return None
+    models = data.get("models") if isinstance(data, dict) else None
+    entries = [x for x in models if isinstance(x, dict)] if isinstance(models, list) else []
+    if not entries:
+        return None
+    body = json.dumps({"models": entries})
+    _manager_lists[real] = (ident, body)
+    return body
+
+
+def _manager_model_list(local: bool) -> str | None:
+    dirs = _manager_dirs()
+    if not dirs:
+        return None  # no Manager installed
+    files = [(os.path.join(d, MANAGER_LIST_FILE), d) for d in dirs]
+    if not local:
+        files[:0] = [(path, os.path.dirname(path)) for path in _manager_cache_files(_manager_files_dir())]
+    for path, root in files:
+        body = _read_manager_list(path, root)
+        if body is not None:
+            return body
+    return None
+
+
+@PromptServer.instance.routes.get("/meshive/manager/models")
+async def manager_models(request):
+    """ComfyUI-Manager's model list in the shape of its own route ({models: [...]}). `mode=local`:
+    the list the Manager ships with. Any other mode: its cached download of the list (see
+    _manager_cache_files), else the shipped one — like the Manager installed as a package, which
+    also answers from its cache or the shipped list without downloading."""
+    local = request.query.get("mode") == "local"
+    body = await asyncio.get_running_loop().run_in_executor(None, _manager_model_list, local)
+    if body is None:
+        return _bad("ComfyUI-Manager's model list was not found", 404)
+    return web.Response(text=body, content_type="application/json")
 
 
 # ---------------------------------------------------------------------------- #

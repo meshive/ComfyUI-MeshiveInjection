@@ -32,6 +32,9 @@ The extension adds these routes to the ComfyUI server (each also under `/api`):
 | `GET` / `POST` | `/meshive/settings` | `{keepalive, cgroup_ram}` (GET also returns `keepalive_running` and `memory`) |
 | `GET` | `/meshive/hf/status` | `{env_token}` |
 | `POST` | `/meshive/hf/verify` | `{token?, urls?}` → `{valid, name, source, access}` |
+| `GET` | `/meshive/manager/models?mode=local\|cache` | ComfyUI-Manager's model list as `{models}`, read from the installed Manager's files (404 without a Manager or a usable list) |
+
+The workflow scan reads ComfyUI-Manager's model list from the Manager's own route when there is one (`/externalmodel/getlist` in the legacy custom node, `/v2/externalmodel/getlist` in the built-in Manager's legacy interface), else from `/meshive/manager/models`, which serves the same list for the built-in Manager's default interface. Its `local` mode is the list the Manager ships with (the `comfyui_manager` package first, then a `ComfyUI-Manager` custom node); any other mode is the Manager's cached download of the list, else the shipped one. The cache file is named after the list's URL: the name for the channel in the Manager's `config.ini` is tried first, then the name for its default channel, which is what the Manager downloads at startup unless `default_cache_as_channel_url` is on. A file that lists no models is skipped. It never downloads anything.
 
 Progress events on the ComfyUI websocket: `meshive_download_progress`, `meshive_download_paused`, `meshive_download_resumed`, `meshive_download_complete`, `meshive_download_error`.
 

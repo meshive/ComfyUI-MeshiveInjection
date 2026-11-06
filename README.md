@@ -6,17 +6,16 @@ When a workflow needs a model you don't have, ComfyUI lists it under **Missing M
 
 ## Installation
 
-The extension is not in the ComfyUI-Manager list yet. Install it from GitHub:
+The extension is not in the Comfy Registry or ComfyUI-Manager's list yet, so the Manager's search does not find it. Install it from GitHub, in a terminal on the pod:
 
-- **In ComfyUI-Manager:** choose *Install via Git URL* and enter `https://github.com/meshive/ComfyUI-MeshiveInjection`. (If that option is disabled by the Manager's security setting, use the terminal instead.)
-- **Or in a terminal on the pod:**
-
-  ```bash
-  cd ComfyUI/custom_nodes
-  git clone https://github.com/meshive/ComfyUI-MeshiveInjection.git
-  ```
+```bash
+cd ComfyUI/custom_nodes
+git clone https://github.com/meshive/ComfyUI-MeshiveInjection.git
+```
 
 Then restart ComfyUI and reload the page. Nothing else needs to be installed.
+
+ComfyUI's built-in Manager cannot install from a Git URL in its default interface. The older ComfyUI-Manager (a custom node) and the built-in Manager's legacy interface have *Install via Git URL*, but it is off by default. It is turned on in the Manager's `config.ini` — `allow_git_url_install = true` in recent versions, a lower `security_level` in older ones — which the Manager reads when ComfyUI starts, and the Manager may still refuse it depending on the address ComfyUI listens on. If it is off, use the terminal. If it is on, enter `https://github.com/meshive/ComfyUI-MeshiveInjection`.
 
 ## How to use it
 
@@ -45,7 +44,7 @@ A download that stops halfway — a lost connection, a pause, ComfyUI restarting
 
 ### Models whose download link is only in a note
 
-Many workflows put the download links in a note instead of attaching them to the model, so ComfyUI can't offer a Download button for those models. When you open a workflow, the extension looks for such links — in notes and other text in the workflow, and in ComfyUI-Manager's model list if you have it — and adds them. Those models then get a Download button and *Install in Pod* like any other.
+Many workflows put the download links in a note instead of attaching them to the model, so ComfyUI can't offer a Download button for those models. When you open a workflow, the extension looks for such links — in notes and other text in the workflow, and in ComfyUI-Manager's model list if a Manager is installed (ComfyUI's built-in Manager or the older custom node) — and adds them. Those models then get a Download button and *Install in Pod* like any other.
 
 If the extension can't tell which folder a model belongs in, a **folder choice** appears next to its button. Pick the folder before installing.
 
@@ -89,7 +88,7 @@ Two more settings, in the downloads panel only, apply to the whole pod:
 
 ## Troubleshooting
 
-- **There is no *Install in Pod* button for a model.** The workflow doesn't say where to download that model from. Look it up on Hugging Face or Civitai and download it another way — for example through ComfyUI-Manager's model list.
+- **There is no *Install in Pod* button for a model.** The workflow doesn't say where to download that model from (nor does ComfyUI-Manager's model list, if you have a Manager). Look it up on Hugging Face or Civitai and download it another way.
 - **The button is greyed out.** Choose a folder in the folder choice next to it, or the model is already installed.
 - **"Authentication required" or "Access denied".** The model is gated: see [Models that need a login](#models-that-need-a-login-gated-models).
 - **"Storage is full and did not grow".** The pod's storage limit was reached. Free up space or increase the limit, then click the button again — the download continues where it stopped.

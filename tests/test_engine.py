@@ -9,6 +9,7 @@ import asyncio
 import atexit
 import errno
 import hashlib
+import importlib.machinery
 import importlib.util
 import json
 import os
@@ -697,8 +698,8 @@ class PanelApiTest(ServerCase):
             await m.serve_script(types.SimpleNamespace(match_info={"name": "missing.js"}))
 
     def test_versions_agree(self):
-        pyproject = re.search(r'^version = "([^"]+)"', (ROOT / "pyproject.toml").read_text(), re.M).group(1)
-        js = re.search(r'export const VERSION = "([^"]+)"', (ROOT / "web" / "meshive_core.js").read_text()).group(1)
+        pyproject = re.search(r'^version = "([^"]+)"', (ROOT / "pyproject.toml").read_text(encoding="utf-8"), re.M).group(1)
+        js = re.search(r'export const VERSION = "([^"]+)"', (ROOT / "web" / "meshive_core.js").read_text(encoding="utf-8")).group(1)
         self.assertEqual(m.__version__, pyproject)
         self.assertEqual(js, pyproject)
 
@@ -904,6 +905,172 @@ class ModelCheckTest(ServerCase):
         self.assertEqual(body_of(await m.model_folders(None)), {"checkpoints": [self.dir]})
 
 
+class ManagerModelListTest(unittest.IsolatedAsyncioTestCase):
+    """ComfyUI-Manager's model list, read from the Manager's files for its interface that has no route for it."""
+
+    # The Manager names its cached download after a hash of the list's URL: on its default channel,
+    # and on the channel https://example.test/channel.
+    DEFAULT_CACHE = "4245046894_model-list.json"
+    CHANNEL_CACHE = "2580119646_model-list.json"
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(dir=TMP)
+        self.custom_nodes = os.path.join(self.root, "custom_nodes")
+        os.makedirs(self.custom_nodes)
+        self.saved_paths = fp.folder_names_and_paths
+        fp.folder_names_and_paths = {"custom_nodes": ([self.custom_nodes], set())}
+        self.files = os.path.join(self.root, "user", "__manager")
+        fp.get_system_user_directory = lambda name: os.path.join(self.root, "user", f"__{name}")
+        m._manager_lists.clear()
+        # The `comfyui_manager` package is found only where a test installs it (package()), never in
+        # the Python running the tests, which may have the real one.
+        self.site = None
+        find_spec = importlib.util.find_spec
+
+        def find_manager(name, package=None):
+            if name != "comfyui_manager":
+                return find_spec(name, package)
+            return importlib.machinery.PathFinder.find_spec(name, [self.site]) if self.site else None
+
+        patcher = patch("importlib.util.find_spec", find_manager)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def tearDown(self):
+        fp.folder_names_and_paths = self.saved_paths
+        del fp.get_system_user_directory
+        m._manager_lists.clear()
+
+    def write(self, path, data):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(data if isinstance(data, str) else json.dumps(data))
+        return path
+
+    def entry(self, name):
+        return {"name": name, "type": "lora", "save_path": "default", "filename": f"{name}.safetensors",
+                "url": f"https://huggingface.co/a/b/resolve/main/{name}.safetensors"}
+
+    def package(self, models):
+        """The built-in Manager, installed as the `comfyui_manager` package."""
+        self.site = os.path.join(self.root, "site")
+        self.write(os.path.join(self.site, "comfyui_manager", "__init__.py"), "")
+        self.write(os.path.join(self.site, "comfyui_manager", "model-list.json"), {"models": models})
+        importlib.invalidate_caches()
+        return os.path.join(self.site, "comfyui_manager")
+
+    def legacy(self, models, name="ComfyUI-Manager"):
+        return self.write(os.path.join(self.custom_nodes, name, "model-list.json"), {"models": models})
+
+    async def get(self, mode=None):
+        resp = await m.manager_models(types.SimpleNamespace(query={} if mode is None else {"mode": mode}))
+        return resp.status, (body_of(resp) if resp.status == 200 else None)
+
+    def names(self, body):
+        return [x["name"] for x in body["models"]]
+
+    async def test_no_manager_no_list(self):
+        self.write(os.path.join(self.files, "cache", self.DEFAULT_CACHE), {"models": [self.entry("stale")]})
+        self.assertEqual((await self.get("local"))[0], 404)
+        self.assertEqual((await self.get("cache"))[0], 404)  # a cache left behind is not a Manager
+
+    async def test_local_is_the_shipped_list_and_cache_the_download(self):
+        self.package([self.entry("shipped")])
+        status, body = await self.get("local")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["models"], [self.entry("shipped")])  # the Manager's own shape
+        # No download yet, or one that failed (the Manager then caches {}): the shipped list.
+        self.assertEqual(self.names((await self.get("cache"))[1]), ["shipped"])
+        cache = self.write(os.path.join(self.files, "cache", self.DEFAULT_CACHE), {})
+        self.assertEqual(self.names((await self.get("cache"))[1]), ["shipped"])
+        self.write(cache, {"models": [self.entry("downloaded"), "not an entry"]})
+        self.assertEqual(self.names((await self.get("cache"))[1]), ["downloaded"])
+        self.assertEqual(self.names((await self.get())[1]), ["downloaded"])  # any mode but local, as in the Manager
+        self.assertEqual(self.names((await self.get("local"))[1]), ["shipped"])
+
+    async def test_cache_under_the_configured_channel_then_the_default_one(self):
+        # The Manager reads its cache under the channel in its config.ini, but downloads the list at
+        # startup under its default channel's name (unless default_cache_as_channel_url is on).
+        self.package([self.entry("shipped")])
+        self.write(os.path.join(self.files, "config.ini"), "[default]\nchannel_url = https://example.test/channel\n")
+        self.assertEqual(self.names((await self.get("cache"))[1]), ["shipped"])
+        self.write(os.path.join(self.files, "cache", self.DEFAULT_CACHE), {"models": [self.entry("default")]})
+        self.assertEqual(self.names((await self.get("cache"))[1]), ["default"])
+        channel = self.write(os.path.join(self.files, "cache", self.CHANNEL_CACHE), {})  # a failed download
+        self.assertEqual(self.names((await self.get("cache"))[1]), ["default"])
+        self.write(channel, {"models": [self.entry("channel")]})
+        self.assertEqual(self.names((await self.get("cache"))[1]), ["channel"])
+        self.assertEqual(self.names((await self.get("local"))[1]), ["shipped"])
+
+    async def test_a_list_without_entries_is_skipped(self):
+        # A channel's cache the Manager no longer refreshes may list nothing; it does not hide the
+        # default channel's download or the shipped list.
+        self.package([self.entry("shipped")])
+        self.write(os.path.join(self.files, "config.ini"), "[default]\nchannel_url = https://example.test/channel\n")
+        channel = self.write(os.path.join(self.files, "cache", self.CHANNEL_CACHE), {"models": []})
+        self.assertEqual(self.names((await self.get("cache"))[1]), ["shipped"])
+        self.write(os.path.join(self.files, "cache", self.DEFAULT_CACHE), {"models": [self.entry("default")]})
+        self.assertEqual(self.names((await self.get("cache"))[1]), ["default"])
+        self.write(channel, {"models": ["not an entry"]})
+        self.assertEqual(self.names((await self.get("cache"))[1]), ["default"])
+        self.write(channel, {"models": [self.entry("channel")]})
+        self.assertEqual(self.names((await self.get("cache"))[1]), ["channel"])
+
+    def test_cache_names(self):
+        cache = os.path.join(self.files, "cache")
+        self.assertEqual(m._manager_cache_files(self.files), [os.path.join(cache, self.DEFAULT_CACHE)])  # no config.ini
+        config = os.path.join(self.files, "config.ini")
+        self.write(config, f"[default]\nchannel_url = {m.MANAGER_DEFAULT_CHANNEL}\n")
+        self.assertEqual(m._manager_cache_files(self.files), [os.path.join(cache, self.DEFAULT_CACHE)])
+        self.write(config, "[default]\nchannel_url = https://example.test/channel\n")
+        self.assertEqual(m._manager_cache_files(self.files),
+                         [os.path.join(cache, self.CHANNEL_CACHE), os.path.join(cache, self.DEFAULT_CACHE)])
+        self.write(config, "not an ini file")  # the Manager then uses its defaults
+        self.assertEqual(m._manager_cache_files(self.files), [os.path.join(cache, self.DEFAULT_CACHE)])
+
+    async def test_legacy_custom_node_and_package_order(self):
+        self.legacy([self.entry("legacy")], name="comfyui-manager")
+        self.write(os.path.join(self.custom_nodes, "Other", "model-list.json"), {"models": [self.entry("other")]})
+        self.assertEqual(self.names((await self.get("local"))[1]), ["legacy"])
+        self.package([self.entry("package")])
+        self.assertEqual(self.names((await self.get("local"))[1]), ["package"])
+
+    async def test_unusable_files_are_skipped(self):
+        legacy = self.legacy([self.entry("legacy")])
+        broken = self.package([])
+        self.write(os.path.join(broken, "model-list.json"), "{not json")
+        self.assertEqual(self.names((await self.get("local"))[1]), ["legacy"])
+        saved = m.MAX_MANAGER_LIST_BYTES
+        m.MAX_MANAGER_LIST_BYTES = os.path.getsize(legacy) - 1
+        self.addCleanup(setattr, m, "MAX_MANAGER_LIST_BYTES", saved)
+        self.assertEqual((await self.get("local"))[0], 404)  # too big
+
+    async def test_a_link_out_of_the_manager_folder_is_not_followed(self):
+        outside = self.write(os.path.join(self.root, "elsewhere", "model-list.json"), {"models": [self.entry("outside")]})
+        target = os.path.join(self.custom_nodes, "ComfyUI-Manager")
+        os.makedirs(target)
+        try:
+            os.symlink(outside, os.path.join(target, "model-list.json"))
+        except (OSError, NotImplementedError) as e:
+            self.skipTest(f"no symlinks here: {e}")
+        self.assertEqual((await self.get("local"))[0], 404)
+        # A Manager folder that is itself a link (as custom nodes are in some images) is fine.
+        os.remove(os.path.join(target, "model-list.json"))
+        os.rmdir(target)
+        os.symlink(os.path.dirname(outside), target, target_is_directory=True)
+        self.assertEqual(self.names((await self.get("local"))[1]), ["outside"])
+
+    async def test_a_list_is_read_again_only_when_it_changes(self):
+        path = self.legacy([self.entry("first")])
+        request = types.SimpleNamespace(query={"mode": "local"})
+        with patch("json.loads", wraps=json.loads) as loads:
+            for _ in range(3):
+                self.assertEqual((await m.manager_models(request)).status, 200)
+        self.assertEqual(loads.call_count, 1)
+        self.write(path, {"models": [self.entry("second")]})
+        self.assertEqual(self.names((await self.get("local"))[1]), ["second"])
+
+
 class PodHelpersTest(unittest.IsolatedAsyncioTestCase):
     """Websocket keepalive, the memory limit report and the pod-side settings."""
 
@@ -1065,6 +1232,31 @@ class FrontendStateTest(unittest.TestCase):
         if r.returncode == 77:
             self.skipTest(r.stdout.strip())
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+
+class ThemeColorTest(unittest.TestCase):
+    """Frontend 1.58.1 renamed its design tokens. The scripts ask for the new name first and fall back
+    to the old one (all an older frontend has), then to a fixed color."""
+
+    RENAMED = {
+        "base-background": "background", "base-foreground": "foreground", "border-default": "border",
+        "border-subtle": "border", "primary-background": "primary", "secondary-background": "secondary",
+        "secondary-background-hover": "accent", "comfy-menu-bg": "background", "warning-background": "warning",
+        "destructive-background": "destructive", "success-background": "color-success",
+    }
+
+    def test_new_token_names_come_first(self):
+        checked = 0
+        for path in sorted((ROOT / "web").glob("*.js")):
+            text = path.read_text(encoding="utf-8")
+            for old, new in self.RENAMED.items():
+                for found in re.finditer(r"var\(--" + re.escape(old) + r"(?![\w-])", text):
+                    checked += 1
+                    self.assertTrue(text[:found.start()].endswith(f"var(--{new}, "),
+                                    f"{path.name}: --{old} is not behind --{new}")
+            for found in re.finditer(r"var\(--(" + "|".join(sorted(set(self.RENAMED.values()))) + r"), (?!var\()", text):
+                self.fail(f"{path.name}: --{found.group(1)} without a fallback to the older name")
+        self.assertGreater(checked, 0)
 
 
 class MessageTest(unittest.TestCase):

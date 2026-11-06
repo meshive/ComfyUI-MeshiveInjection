@@ -8,8 +8,8 @@ import { T, hfState, hfVerify, debugLog } from "./meshive_core.js";
 const MARK = "data-meshive-pod";
 const TOKEN_RE = /^hf_[A-Za-z0-9]{8,200}$/;
 const COLOR = {
-    ok: "var(--success-background, #16a34a)", warn: "var(--warning-background, #d97706)",
-    error: "var(--destructive-background, #dc2626)", muted: "var(--muted-foreground, #999)",
+    ok: "var(--color-success, var(--success-background, #16a34a))", warn: "var(--warning, var(--warning-background, #d97706))",
+    error: "var(--destructive, var(--destructive-background, #dc2626))", muted: "var(--muted-foreground, #999)",
 };
 
 let result = null;        // the last verification: {valid, name, source, access, code, error}
@@ -31,7 +31,7 @@ function setText(e, text) { if (e.textContent !== text) e.textContent = text; }
 function show(e, on, display = "block") { const v = on ? display : "none"; if (e.style.display !== v) e.style.display = v; }
 
 function build() {
-    const sec = el("div", { marginTop: "6px", borderRadius: "0.5rem", background: "var(--secondary-background, #262626)", overflow: "hidden", fontSize: "0.75rem" });
+    const sec = el("div", { marginTop: "6px", borderRadius: "0.5rem", background: "var(--secondary, var(--secondary-background, #262626))", overflow: "hidden", fontSize: "0.75rem" });
     sec.setAttribute(MARK, "hf-token");
     const head = el("div", { padding: "6px 10px", display: "flex", justifyContent: "space-between", gap: "8px" });
     const count = el("span", { color: COLOR.muted });
@@ -46,11 +46,11 @@ function build() {
     input.spellcheck = false;
     Object.assign(input.style, {
         flex: "1", minWidth: "0", height: "28px", padding: "0 8px", fontFamily: "monospace", fontSize: "0.75rem",
-        borderRadius: "0.375rem", border: "1px solid var(--border-default, #444)", background: "var(--base-background, #1e1e1e)", color: "var(--base-foreground, #eee)",
+        borderRadius: "0.375rem", border: "1px solid var(--border, var(--border-default, #444))", background: "var(--background, var(--base-background, #1e1e1e))", color: "var(--foreground, var(--base-foreground, #eee))",
     });
     const verify = el("button", {
         height: "28px", padding: "0 10px", border: "none", borderRadius: "0.375rem", cursor: "pointer", flexShrink: "0",
-        background: "var(--primary-background, #3b82f6)", color: "var(--base-foreground, #eee)", fontSize: "0.75rem",
+        background: "var(--primary, var(--primary-background, #3b82f6))", color: "var(--foreground, var(--base-foreground, #eee))", fontSize: "0.75rem",
     }, T.hfVerify);
     verify.type = "button";
     inputRow.append(input, verify);
@@ -137,7 +137,7 @@ function update(sec) {
         p.terms.replaceChildren(...denied.map((g) => {
             const row = el("div", { display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px" });
             const a = result.access[g.url];
-            const link = el("a", { color: "var(--primary-background, #3b82f6)", flexShrink: "0" }, reasonText(a.reason));
+            const link = el("a", { color: "var(--primary, var(--primary-background, #3b82f6))", flexShrink: "0" }, reasonText(a.reason));
             if (a.repo) { link.href = a.repo; link.target = "_blank"; link.rel = "noopener noreferrer"; }
             row.append(el("span", { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: "0" }, g.name), link);
             return row;

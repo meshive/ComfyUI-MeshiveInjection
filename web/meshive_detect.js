@@ -4,7 +4,8 @@ import { api } from "../../scripts/api.js";
 // The frontend lists a missing model with a Download button only when the workflow carries its URL
 // (a node's `properties.models`, or the workflow's own `models`). Many workflows only mention the
 // link in a note, or not at all. Before a workflow is loaded we look for those links — in every
-// string of the workflow, and in ComfyUI-Manager's model list when it is installed — and add them
+// string of the workflow, and in ComfyUI-Manager's model list when a Manager is installed (the
+// legacy custom node or ComfyUI's built-in one) — and add them
 // to the workflow's `models`, so the frontend lists those models with a Download button (and ours).
 //
 // The folder tables and the scoring below follow ComfyUI-RunpodDirect by Madiator2011
@@ -243,28 +244,41 @@ export function inferDirectory({ name, url, nodeTypes = [], directory = null }, 
 let managerIndex = null;     // file name -> entries, once loaded
 let managerLoading = null;
 
-// Load ComfyUI-Manager's model list in the background: its bundled copy first ("local", no network),
-// then its cached download. Workflow loading never waits for it.
+// Where the list is served, each with the modes to ask for in turn. The legacy Manager (a custom
+// node) and the legacy interface of ComfyUI's built-in Manager serve it themselves: their bundled
+// copy first ("local", no network), then their cached download. The built-in Manager's default
+// interface has no such route, so this extension reads the Manager's files instead; its "cache"
+// answer is the Manager's cached download, else the bundled copy, and never goes to the network.
+const MANAGER_MODEL_LISTS = [
+    ["/externalmodel/getlist", ["local", "cache"]],
+    ["/v2/externalmodel/getlist", ["local", "cache"]],
+    ["/meshive/manager/models", ["cache"]],
+];
+
+// Load ComfyUI-Manager's model list in the background. Workflow loading never waits for it.
 export function preloadManagerModels() {
     if (managerIndex || managerLoading) return managerLoading;
     managerLoading = (async () => {
         const index = new Map();
-        for (const mode of ["local", "cache"]) {
-            try {
-                const res = await api.fetchApi(`/externalmodel/getlist?mode=${mode}`);
-                if (!res.ok) continue;
-                const list = (await res.json())?.models;
-                if (!Array.isArray(list)) continue;
-                for (const m of list) {
-                    const file = baseName(m?.filename);
-                    const url = normalizeUrl(m?.url || "");
-                    if (!file || !url || !hasModelExtension(file)) continue;
-                    const key = file.toLowerCase();
-                    if (!index.has(key)) index.set(key, []);
-                    index.get(key).push({ url, save_path: String(m.save_path || ""), type: String(m.type || "") });
-                }
-                break;
-            } catch { /* Manager not installed */ }
+        sources: for (const [path, modes] of MANAGER_MODEL_LISTS) {
+            for (const mode of modes) {
+                try {
+                    const res = await api.fetchApi(`${path}?mode=${mode}`);
+                    if (res.status === 404) continue sources; // not served here: try the next source
+                    if (!res.ok) continue;
+                    const list = (await res.json())?.models;
+                    if (!Array.isArray(list)) continue;
+                    for (const m of list) {
+                        const file = baseName(m?.filename);
+                        const url = normalizeUrl(m?.url || "");
+                        if (!file || !url || !hasModelExtension(file)) continue;
+                        const key = file.toLowerCase();
+                        if (!index.has(key)) index.set(key, []);
+                        index.get(key).push({ url, save_path: String(m.save_path || ""), type: String(m.type || "") });
+                    }
+                    break sources;
+                } catch { /* no Manager there */ }
+            }
         }
         managerIndex = index;
     })();
@@ -437,11 +451,15 @@ export function attachModelMetadata(graph, models, categoryFor) {
                 if (!names.has(m.name) || (directory && m.directory && directory !== m.directory)) continue;
                 node.properties ??= {};
                 const embedded = node.properties.models ??= [];
-                const metadata = { name: m.name, url: m.url, directory: m.directory,
+                // No `directory` key at all when the folder is not known: the frontend (1.57 and
+                // later) drops a node's model entry whose directory is not a string, URL included.
+                const metadata = { name: m.name, url: m.url, ...(m.directory ? { directory: m.directory } : {}),
                     ...(m.hash ? { hash: m.hash } : {}), ...(m.hash_type ? { hash_type: m.hash_type } : {}) };
                 const existing = embedded.find((e) => e.name === m.name && (!e.url || e.url === m.url));
-                if (existing) Object.assign(existing, metadata);
-                else embedded.push(metadata);
+                if (existing) {
+                    Object.assign(existing, metadata);
+                    if (existing.directory == null) delete existing.directory;
+                } else embedded.push(metadata);
             }
         }
     };

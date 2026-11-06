@@ -252,6 +252,75 @@ await test("a delayed Manager supplement cannot leak links or folder choices int
     } finally { globalThis.__api.fetchApi = real; }
 });
 
+// The Manager's model list served at `served` (path -> models) only; the paths asked for are returned.
+async function managerListFrom(served, missing = "listed_lora.safetensors") {
+    const fresh = await import(pathToFileURL(join(tmp, "extensions", "meshive", "meshive_detect.js")) + `?served-${Object.keys(served).join("-")}`);
+    const real = globalThis.__api.fetchApi;
+    const asked = [];
+    globalThis.__api.fetchApi = (path, opts) => {
+        const [route] = path.split("?");
+        if (!(route in served) && !route.startsWith("/meshive/models/")) {
+            asked.push(path);
+            return { ok: false, status: 404, json: async () => ({}) };
+        }
+        if (route in served) {
+            asked.push(path);
+            return { ok: true, status: 200, json: async () => ({ models: served[route] }) };
+        }
+        return real(path, opts);
+    };
+    try {
+        missingOnServer = new Set([missing]);
+        await fresh.preloadManagerModels();
+        const added = await fresh.seedWorkflow({ nodes: [node(1, "SomeCustomLoader", [missing])] }, categoryFor);
+        return { asked, added };
+    } finally { globalThis.__api.fetchApi = real; }
+}
+
+const listed = [{ filename: "listed_lora.safetensors", url: "https://huggingface.co/m/l/resolve/main/listed_lora.safetensors", save_path: "default", type: "lora" }];
+
+await test("the legacy Manager's own list is used first, with its bundled copy", async () => {
+    const { asked, added } = await managerListFrom({ "/externalmodel/getlist": listed });
+    assert.deepEqual(asked, ["/externalmodel/getlist?mode=local"]);
+    assert.equal(added[0]?.url, listed[0].url);
+});
+
+await test("the built-in Manager's legacy interface serves the list under /v2", async () => {
+    const { asked, added } = await managerListFrom({ "/v2/externalmodel/getlist": listed });
+    assert.deepEqual(asked, ["/externalmodel/getlist?mode=local", "/v2/externalmodel/getlist?mode=local"]);
+    assert.equal(added[0]?.url, listed[0].url);
+    assert.equal(added[0]?.directory, "loras");
+});
+
+await test("without a Manager route, the extension's own route serves the Manager's list", async () => {
+    const { asked, added } = await managerListFrom({ "/meshive/manager/models": listed });
+    // A route that is not there is not asked again in another mode; the extension's route is
+    // asked for the Manager's cached download (it falls back to the bundled list itself).
+    assert.deepEqual(asked, ["/externalmodel/getlist?mode=local", "/v2/externalmodel/getlist?mode=local", "/meshive/manager/models?mode=cache"]);
+    assert.equal(added[0]?.url, listed[0].url);
+});
+
+await test("no Manager at all leaves the list empty", async () => {
+    const { asked, added } = await managerListFrom({});
+    assert.equal(asked.length, 3);
+    assert.deepEqual(added, []);
+});
+
+await test("model metadata on a node never carries an unknown folder as null", async () => {
+    // The frontend (1.57 and later) drops a node's model entry whose directory is not a string.
+    const url = "https://huggingface.co/a/b/resolve/main/w.safetensors";
+    const loader = (models) => ({ type: "CustomWeightsLoader", widgets: [{ type: "combo", value: "w.safetensors" }], properties: models ? { models } : {} });
+    const graph = { _nodes: [
+        loader(),
+        loader([{ name: "w.safetensors", url, directory: null }]),     // written so by an older version
+        loader([{ name: "w.safetensors", url, directory: "loras" }]),  // a folder chosen earlier
+    ] };
+    d.attachModelMetadata(graph, [{ name: "w.safetensors", url, directory: null }], categoryFor);
+    assert.deepEqual(graph._nodes[0].properties.models, [{ name: "w.safetensors", url }]);
+    assert.deepEqual(graph._nodes[1].properties.models, [{ name: "w.safetensors", url }]);
+    assert.deepEqual(graph._nodes[2].properties.models, [{ name: "w.safetensors", url, directory: "loras" }]);
+});
+
 await test("candidate enrichment preserves existing links and separate model directories", async () => {
     const list = [
         { name: "same.gguf", url: "https://huggingface.co/user/model", directory: "vae", isMissing: true },

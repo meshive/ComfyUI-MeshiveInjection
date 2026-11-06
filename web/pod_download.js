@@ -171,9 +171,9 @@ function ensureProgressArea(allLine) {
     if (!batch || !allLine) { area?.remove(); return; }
     if (!area || area.previousElementSibling !== allLine) {
         area?.remove();
-        area = el("div", { marginTop: "6px", borderRadius: "0.5rem", background: "var(--secondary-background, #262626)", overflow: "hidden", fontSize: "0.75rem" });
+        area = el("div", { marginTop: "6px", borderRadius: "0.5rem", background: "var(--secondary, var(--secondary-background, #262626))", overflow: "hidden", fontSize: "0.75rem" });
         area.setAttribute(MARK, "progress");
-        const head = el("div", { padding: "6px 10px", display: "flex", flexWrap: "wrap", justifyContent: "space-between", gap: "2px 10px", borderBottom: "1px solid var(--border-default, #444)" });
+        const head = el("div", { padding: "6px 10px", display: "flex", flexWrap: "wrap", justifyContent: "space-between", gap: "2px 10px", borderBottom: "1px solid var(--border, var(--border-default, #444))" });
         head.append(el("span", { fontWeight: "600" }, T.progressTitle), el("span", { color: "var(--muted-foreground, #999)" }));
         const items = el("div");
         const foot = el("div", { padding: "6px 10px", display: "none", justifyContent: "flex-end" });
@@ -183,7 +183,7 @@ function ensureProgressArea(allLine) {
     const [head, items, foot] = area.children;
     const s = batchSummary();
     setText(head.lastChild, T.batch(s));
-    head.lastChild.style.color = s.failed ? "var(--destructive-background, #dc2626)" : "var(--muted-foreground, #999)";
+    head.lastChild.style.color = s.failed ? "var(--destructive, var(--destructive-background, #dc2626))" : "var(--muted-foreground, #999)";
 
     for (const child of [...items.children]) if (!batch.entries.has(child.dataset.key)) child.remove();
     for (const [key, entry] of batch.entries) {
@@ -196,9 +196,9 @@ function ensureProgressArea(allLine) {
             const top = el("div", { display: "flex", justifyContent: "space-between", gap: "8px" });
             top.append(el("span", { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: "0" }, request.name),
                 el("span", { flexShrink: "0", color: "var(--muted-foreground, #999)" }));
-            const bar = el("div", { height: "4px", borderRadius: "9999px", background: "var(--secondary-background-hover, #444)", overflow: "hidden", margin: "4px 0" });
+            const bar = el("div", { height: "4px", borderRadius: "9999px", background: "var(--accent, var(--secondary-background-hover, #444))", overflow: "hidden", margin: "4px 0" });
             bar.append(el("div", { height: "100%", width: "0%", borderRadius: "9999px", transition: "width 0.2s" }));
-            const err = el("div", { color: "var(--destructive-background, #dc2626)", whiteSpace: "pre-wrap", overflowWrap: "anywhere", display: "none" });
+            const err = el("div", { color: "var(--destructive, var(--destructive-background, #dc2626))", whiteSpace: "pre-wrap", overflowWrap: "anywhere", display: "none" });
             item.append(top, bar, err);
             items.append(item);
         }
@@ -207,8 +207,8 @@ function ensureProgressArea(allLine) {
         setText(top.lastChild, areaLabel(st));
         const fill = bar.firstChild;
         if (fill.style.width !== `${pct}%`) fill.style.width = `${pct}%`;
-        fill.style.background = st?.status === "error" ? "var(--destructive-background, #dc2626)"
-            : isDone(st) ? "var(--success-background, #16a34a)" : "var(--primary-background, #3b82f6)";
+        fill.style.background = st?.status === "error" ? "var(--destructive, var(--destructive-background, #dc2626))"
+            : isDone(st) ? "var(--color-success, var(--success-background, #16a34a))" : "var(--primary, var(--primary-background, #3b82f6))";
         setText(err, st?.status === "error" ? (st.error || "") : "");
         err.style.display = st?.status === "error" && st.error ? "block" : "none";
     }
@@ -371,8 +371,8 @@ function ensureBrowserDownload(row, c, template) {
         link.setAttribute(MARK, "browser-download");
         link.className = (document.querySelector(`button[data-testid="${ROW_TESTID}"]`) ?? template)?.className ?? "";
         Object.assign(link.style, { display: "inline-flex", alignItems: "center", justifyContent: "center", flexShrink: "0", width: "auto", whiteSpace: "normal",
-            padding: "4px 8px", borderRadius: "0.375rem", background: "var(--secondary-background, #333)",
-            color: "var(--base-foreground, #eee)", fontSize: "0.75rem", textDecoration: "none" });
+            padding: "4px 8px", borderRadius: "0.375rem", background: "var(--secondary, var(--secondary-background, #333))",
+            color: "var(--foreground, var(--base-foreground, #eee))", fontSize: "0.75rem", textDecoration: "none" });
         link.target = "_blank";
         link.rel = "noopener noreferrer";
         link.addEventListener("click", (e) => e.stopPropagation());
@@ -395,7 +395,7 @@ function ensureFolderPicker(line, c) {
         select.title = T.folder;
         select.setAttribute("aria-label", `${T.folder}: ${c.name}`);
         Object.assign(select.style, { marginRight: "6px", maxWidth: "45%", fontSize: "0.75rem", borderRadius: "0.375rem",
-            background: "var(--base-background, #1e1e1e)", color: "var(--base-foreground, #eee)", border: "1px solid var(--border-default, #444)" });
+            background: "var(--background, var(--base-background, #1e1e1e))", color: "var(--foreground, var(--base-foreground, #eee))", border: "1px solid var(--border, var(--border-default, #444))" });
         select.append(new Option(T.chooseFolder, ""));
         for (const dir of choice.options) select.append(new Option(dir, dir));
         select.addEventListener("click", (e) => e.stopPropagation());

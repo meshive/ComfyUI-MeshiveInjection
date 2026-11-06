@@ -61,8 +61,8 @@ function onKey(e) {
 function button(label, onClick, background) {
     const b = el("button", {
         height: "32px", padding: "0 12px", borderRadius: "0.5rem", cursor: "pointer", fontSize: "0.75rem", fontWeight: "600",
-        border: background ? "none" : "1px solid var(--border-default, #444)", background: background ?? "var(--secondary-background, #333)",
-        color: "var(--base-foreground, #eee)",
+        border: background ? "none" : "1px solid var(--border, var(--border-default, #444))", background: background ?? "var(--secondary, var(--secondary-background, #333))",
+        color: "var(--foreground, var(--base-foreground, #eee))",
     }, label);
     b.type = "button";
     b.addEventListener("click", (e) => { e.stopPropagation(); onClick(); });
@@ -74,7 +74,7 @@ function showReport(report, { queueAnyway, install }) {
     const overlay = el("div", { position: "fixed", inset: "0", zIndex: "2000", background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", padding: "16px" });
     overlay.setAttribute(OVERLAY, "1");
     overlay.addEventListener("click", closeGuard);
-    const box = el("div", { width: "100%", maxWidth: "560px", borderRadius: "0.75rem", border: "1px solid var(--border-default, #444)", background: "var(--base-background, #1e1e1e)", color: "var(--base-foreground, #eee)", overflow: "hidden", boxShadow: "0 20px 40px rgba(0,0,0,0.35)" });
+    const box = el("div", { width: "100%", maxWidth: "560px", borderRadius: "0.75rem", border: "1px solid var(--border, var(--border-default, #444))", background: "var(--background, var(--base-background, #1e1e1e))", color: "var(--foreground, var(--base-foreground, #eee))", overflow: "hidden", boxShadow: "0 20px 40px rgba(0,0,0,0.35)" });
     box.setAttribute("role", "dialog");
     box.setAttribute("aria-label", T.guardTitle);
     box.addEventListener("click", (e) => e.stopPropagation());
@@ -82,9 +82,9 @@ function showReport(report, { queueAnyway, install }) {
     const missing = report.missing ?? [];
     const unresolved = report.unresolved ?? [];
     const items = missing.length ? missing : unresolved;
-    const list = el("div", { maxHeight: "260px", overflowY: "auto", borderRadius: "0.5rem", background: "var(--secondary-background, #262626)", border: "1px solid var(--border-subtle, #333)" });
+    const list = el("div", { maxHeight: "260px", overflowY: "auto", borderRadius: "0.5rem", background: "var(--secondary, var(--secondary-background, #262626))", border: "1px solid var(--border, var(--border-subtle, #333))" });
     for (const m of items.slice(0, 40)) {
-        const row = el("div", { display: "flex", alignItems: "center", justifyContent: "space-between", gap: "10px", padding: "8px 10px", borderBottom: "1px solid var(--border-subtle, #333)", fontSize: "0.8125rem" });
+        const row = el("div", { display: "flex", alignItems: "center", justifyContent: "space-between", gap: "10px", padding: "8px 10px", borderBottom: "1px solid var(--border, var(--border-subtle, #333))", fontSize: "0.8125rem" });
         row.append(el("span", { minWidth: "0", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }, m.filename),
             el("span", { flexShrink: "0", fontSize: "0.6875rem", color: "var(--muted-foreground, #999)" },
                 `${m.directory ?? "?"} · ${T.guardReason[m.reason] ?? m.reason}`));
@@ -95,11 +95,11 @@ function showReport(report, { queueAnyway, install }) {
     const body = el("div", { padding: "14px 16px", display: "flex", flexDirection: "column", gap: "10px" });
     body.append(el("div", { fontSize: "0.8125rem", color: "var(--muted-foreground, #999)", lineHeight: "1.45" }, T.guardText), list);
     if (missing.length && unresolved.length) {
-        body.append(el("div", { fontSize: "0.75rem", color: "var(--warning-background, #d97706)" }, T.guardUnresolved(unresolved.length)));
+        body.append(el("div", { fontSize: "0.75rem", color: "var(--warning, var(--warning-background, #d97706))" }, T.guardUnresolved(unresolved.length)));
     }
 
     const installable = missing.filter((m) => m.url && m.directory);
-    const footer = el("div", { padding: "12px 16px", borderTop: "1px solid var(--border-default, #444)", display: "flex", justifyContent: "flex-end", gap: "8px", flexWrap: "wrap" });
+    const footer = el("div", { padding: "12px 16px", borderTop: "1px solid var(--border, var(--border-default, #444))", display: "flex", justifyContent: "flex-end", gap: "8px", flexWrap: "wrap" });
     footer.append(button(T.cancel, closeGuard));
     if (installable.length) {
         const b = button(T.guardInstall(installable.length), () => { closeGuard(); install(installable); }, "transparent");
@@ -109,9 +109,9 @@ function showReport(report, { queueAnyway, install }) {
         b.setAttribute(BRAND_ATTR, "");
         footer.append(b);
     }
-    footer.append(button(T.guardAnyway, () => { closeGuard(); queueAnyway(); }, "var(--warning-background, #d97706)"));
+    footer.append(button(T.guardAnyway, () => { closeGuard(); queueAnyway(); }, "var(--warning, var(--warning-background, #d97706))"));
 
-    box.append(el("div", { padding: "14px 16px", borderBottom: "1px solid var(--border-default, #444)", fontSize: "1rem", fontWeight: "600" }, T.guardTitle), body, footer);
+    box.append(el("div", { padding: "14px 16px", borderBottom: "1px solid var(--border, var(--border-default, #444))", fontSize: "1rem", fontWeight: "600" }, T.guardTitle), body, footer);
     overlay.append(box);
     document.body.append(overlay);
     document.addEventListener("keydown", onKey, true);

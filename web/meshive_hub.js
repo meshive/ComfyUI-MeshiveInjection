@@ -36,14 +36,14 @@ export function installHubBranding() {
     }
     .${HUB_BUTTON_CLASS} {
         border: 1px solid transparent;
-        background: linear-gradient(var(--comfy-menu-bg, #171718), var(--comfy-menu-bg, #171718)) padding-box, ${BRAND_GRADIENT} border-box;
-        color: var(--base-foreground, #fff);
+        background: linear-gradient(var(--background, var(--comfy-menu-bg, #171718)), var(--background, var(--comfy-menu-bg, #171718))) padding-box, ${BRAND_GRADIENT} border-box;
+        color: var(--foreground, var(--base-foreground, #fff));
         gap: 6px;
         padding-left: 8px;
         padding-right: 11px;
     }
     .${HUB_BUTTON_CLASS}:hover, .${HUB_BUTTON_CLASS}.${OPEN_CLASS} {
-        background: linear-gradient(var(--secondary-background, #262729), var(--secondary-background, #262729)) padding-box, ${BRAND_GRADIENT} border-box;
+        background: linear-gradient(var(--secondary, var(--secondary-background, #262729)), var(--secondary, var(--secondary-background, #262729))) padding-box, ${BRAND_GRADIENT} border-box;
     }
     [${BRAND_ATTR}] {
         background: ${BRAND};
@@ -88,18 +88,18 @@ function setText(e, text) { if (e.textContent !== text) e.textContent = text; }
 function setStyle(e, key, value) { if (e.style[key] !== value) e.style[key] = value; }
 
 const COLOR = {
-    downloading: "var(--primary-background, #3b82f6)", queued: "var(--warning-background, #d97706)",
-    paused: "var(--warning-background, #d97706)", waiting_storage: "var(--warning-background, #d97706)",
-    verifying: "var(--primary-background, #3b82f6)", complete: "var(--success-background, #16a34a)",
-    exists: "var(--success-background, #16a34a)", error: "var(--destructive-background, #dc2626)",
+    downloading: "var(--primary, var(--primary-background, #3b82f6))", queued: "var(--warning, var(--warning-background, #d97706))",
+    paused: "var(--warning, var(--warning-background, #d97706))", waiting_storage: "var(--warning, var(--warning-background, #d97706))",
+    verifying: "var(--primary, var(--primary-background, #3b82f6))", complete: "var(--color-success, var(--success-background, #16a34a))",
+    exists: "var(--color-success, var(--success-background, #16a34a))", error: "var(--destructive, var(--destructive-background, #dc2626))",
     cancelled: "var(--muted-foreground, #888)",
 };
 
 function button(label, onClick, primary = false) {
     const b = el("button", {
-        border: primary ? "none" : "1px solid var(--border-default, #444)", borderRadius: "0.375rem",
-        background: primary ? "var(--primary-background, #3b82f6)" : "var(--secondary-background, #333)",
-        color: "var(--base-foreground, #eee)", height: "24px", padding: "0 8px", fontSize: "0.6875rem", cursor: "pointer",
+        border: primary ? "none" : "1px solid var(--border, var(--border-default, #444))", borderRadius: "0.375rem",
+        background: primary ? "var(--primary, var(--primary-background, #3b82f6))" : "var(--secondary, var(--secondary-background, #333))",
+        color: "var(--foreground, var(--base-foreground, #eee))", height: "24px", padding: "0 8px", fontSize: "0.6875rem", cursor: "pointer",
     }, label);
     b.type = "button";
     b.addEventListener("click", (e) => { e.stopPropagation(); onClick(); });
@@ -121,19 +121,19 @@ function runAction(action, st) {
 }
 
 function makeRow(st) {
-    const row = el("div", { padding: "8px 10px", borderBottom: "1px solid var(--border-subtle, #333)", display: "flex", flexDirection: "column", gap: "5px" });
+    const row = el("div", { padding: "8px 10px", borderBottom: "1px solid var(--border, var(--border-subtle, #333))", display: "flex", flexDirection: "column", gap: "5px" });
     const top = el("div", { display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px" });
     const name = el("span", { minWidth: "0", flex: "1", fontSize: "0.8125rem", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
     const badge = el("span", { flexShrink: "0", fontSize: "0.625rem", fontWeight: "600", textTransform: "uppercase", borderRadius: "9999px", padding: "2px 7px" });
     top.append(name, badge);
-    const bar = el("div", { width: "100%", height: "4px", borderRadius: "9999px", background: "var(--secondary-background-hover, #444)", overflow: "hidden" });
+    const bar = el("div", { width: "100%", height: "4px", borderRadius: "9999px", background: "var(--accent, var(--secondary-background-hover, #444))", overflow: "hidden" });
     const fill = el("div", { height: "100%", width: "0%", borderRadius: "9999px", transition: "width 0.2s" });
     bar.append(fill);
     const info = el("div", { display: "flex", justifyContent: "space-between", gap: "8px", fontSize: "0.6875rem", color: "var(--muted-foreground, #999)" });
     const left = el("span");
     const right = el("span", { textAlign: "right" });
     info.append(left, right);
-    const error = el("div", { fontSize: "0.6875rem", color: "var(--destructive-background, #dc2626)", lineHeight: "1.3", wordBreak: "break-word", display: "none" });
+    const error = el("div", { fontSize: "0.6875rem", color: "var(--destructive, var(--destructive-background, #dc2626))", lineHeight: "1.3", wordBreak: "break-word", display: "none" });
     const actions = el("div", { display: "flex", justifyContent: "flex-end", gap: "6px" });
     row.append(top, bar, info, error, actions);
     row._parts = { name, badge, fill, left, right, error, actions };
@@ -310,14 +310,14 @@ export function openHub(info) {
     if (panel) return;
     panel = el("div", {
         position: "fixed", zIndex: "1100", width: "380px", maxWidth: "calc(100vw - 24px)", display: "flex", flexDirection: "column",
-        borderRadius: "0.7rem", border: "1px solid var(--border-default, #444)", background: "var(--base-background, #1e1e1e)",
-        color: "var(--base-foreground, #eee)", boxShadow: "0 12px 30px rgba(0,0,0,0.38)", overflow: "hidden",
+        borderRadius: "0.7rem", border: "1px solid var(--border, var(--border-default, #444))", background: "var(--background, var(--base-background, #1e1e1e))",
+        color: "var(--foreground, var(--base-foreground, #eee))", boxShadow: "0 12px 30px rgba(0,0,0,0.38)", overflow: "hidden",
     });
     panel.dataset.meshiveHub = "1";
     panel.setAttribute("role", "dialog");
     panel.setAttribute("aria-label", T.hubTitle);
 
-    const header = el("div", { padding: "10px 12px", borderBottom: "1px solid var(--border-default, #444)", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px" });
+    const header = el("div", { padding: "10px 12px", borderBottom: "1px solid var(--border, var(--border-default, #444))", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px" });
     const title = el("div", { display: "flex", flexDirection: "column" });
     title.append(el("span", { fontSize: "0.875rem", fontWeight: "600" }, T.hubTitle),
         el("span", { fontSize: "0.6875rem", color: "var(--muted-foreground, #999)" }, `v${VERSION}${info?.host ? ` · ${T.podWord} ${info.host}` : ""}`));
@@ -334,15 +334,15 @@ export function openHub(info) {
     header.append(brand, x);
 
     const body = el("div", { padding: "10px 12px", display: "flex", flexDirection: "column", gap: "8px", minHeight: "0", overflow: "hidden" });
-    const card = el("div", { border: "1px solid var(--border-subtle, #333)", borderRadius: "0.5rem", background: "var(--secondary-background, #262626)", display: "flex", flexDirection: "column", minHeight: "0", overflow: "hidden" });
-    const cardHead = el("div", { padding: "8px 10px", display: "flex", justifyContent: "space-between", borderBottom: "1px solid var(--border-subtle, #333)", fontSize: "0.75rem" });
+    const card = el("div", { border: "1px solid var(--border, var(--border-subtle, #333))", borderRadius: "0.5rem", background: "var(--secondary, var(--secondary-background, #262626))", display: "flex", flexDirection: "column", minHeight: "0", overflow: "hidden" });
+    const cardHead = el("div", { padding: "8px 10px", display: "flex", justifyContent: "space-between", borderBottom: "1px solid var(--border, var(--border-subtle, #333))", fontSize: "0.75rem" });
     statsEl = el("span", { color: "var(--muted-foreground, #999)", fontSize: "0.6875rem" });
     cardHead.append(el("span", { fontWeight: "600" }, T.hubTitle), statsEl);
     listEl = el("div", { overflowY: "auto", minHeight: "60px", maxHeight: "340px" });
     card.append(cardHead, listEl);
 
     const settings = document.createElement("details");
-    Object.assign(settings.style, { border: "1px solid var(--border-subtle, #333)", borderRadius: "0.5rem", background: "var(--secondary-background, #262626)", padding: "6px 8px" });
+    Object.assign(settings.style, { border: "1px solid var(--border, var(--border-subtle, #333))", borderRadius: "0.5rem", background: "var(--secondary, var(--secondary-background, #262626))", padding: "6px 8px" });
     const summary = el("summary", { cursor: "pointer", fontSize: "0.75rem", fontWeight: "600" }, T.settings);
     const settingsBody = el("div", { display: "flex", flexDirection: "column", gap: "6px", paddingTop: "6px" });
     settingsBody.append(
